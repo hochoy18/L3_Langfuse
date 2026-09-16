@@ -1,0 +1,226 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 踩坑速查 · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html" class="active">踩坑速查</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · PROMPT PITFALLS</div>
+      <h1>Prompt 踩坑速查</h1>
+      <div class="meta">8 个常见坑 + 调试 SOP + 5 个反直觉但正确的认知。遇到问题先查这张表。</div>
+    </header>
+
+    <div class="objective">
+      <strong>本页目标</strong><br>
+      把所有新手容易踩的坑集中放一页。每一个坑都配"现象 → 原因 → 修法"三段式。写代码 / on-call 的时候查得到。
+    </div>
+
+    <h2>1. 8 个最常见的坑</h2>
+
+    <h3>坑 1：传字符串而不是 PromptClient 对象</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>UI 上 trace 的 input 字段有 prompt 文字，但<strong>没有 prompt 徽章</strong></td></tr>
+        <tr><td>原因</td><td><code>update_current_generation(prompt="字符串")</code>，Langfuse 拿不到 <code>.name</code> / <code>.version</code></td></tr>
+        <tr><td>修法</td><td>改 <code>prompt=p</code>（PromptClient 对象）</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># ❌ 错
+lf.update_current_generation(prompt=compiled_str)
+
+# ✅ 对
+lf.update_current_generation(prompt=p)</code></pre>
+
+    <h3>坑 2：参数名写错（usage 而非 usage_details）</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td><code>TypeError: Langfuse.update_current_generation() got an unexpected keyword argument 'usage'</code></td></tr>
+        <tr><td>原因</td><td>SDK v3 参数名跟 OTEL 协议对齐，叫 <code>usage_details</code></td></tr>
+        <tr><td>修法</td><td>改 <code>usage_details=</code></td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># ❌ 错
+lf.update_current_generation(usage={"input": ..., "output": ...})
+
+# ✅ 对
+lf.update_current_generation(usage_details={
+    "input_tokens": ...,
+    "output_tokens": ...,
+    "total_tokens": ...,
+})</code></pre>
+
+    <h3>坑 3：误解默认行为（以为是取最新版本）</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>以为 <code>get_prompt(name)</code> 拿版本号最大的那个</td></tr>
+        <tr><td>原因</td><td>实际默认拉取带 <code>production</code> label 的版本</td></tr>
+        <tr><td>修法</td><td>记住这条规则。如果要拉最新版，显式 <code>label="latest"</code></td></tr>
+      </tbody>
+    </table>
+
+    <pre><code>p = lf.get_prompt(name)                # 默认 production
+p = lf.get_prompt(name, label="latest")  # 显式 latest</code></pre>
+
+    <h3>坑 4：代码引用 <code>label="latest"</code> 当 production 用</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>每次发新版本都自动生效，等于裸奔发版</td></tr>
+        <tr><td>原因</td><td>代码侧写 <code>get_prompt(name, label="latest")</code></td></tr>
+        <tr><td>修法</td><td>永远引用 <code>production</code>（不传 label 参数）</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ <code>latest</code> 是给你看新版本用的，不是上线用的</strong>。
+    </div>
+
+    <h3>坑 5：create_prompt 时直接打 production</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>新版没验证就上线，改坏了只能 UI 回滚</td></tr>
+        <tr><td>原因</td><td><code>create_prompt(labels=["production"])</code> 会让旧 production 失去 label</td></tr>
+        <tr><td>修法</td><td>先 <code>labels=[]</code>，UI 验证后再切 production</td></tr>
+      </tbody>
+    </table>
+
+    <h3>坑 6：<code>@observe()</code> 默认 span 包 LLM 调用</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>UI 上节点是 span（⏱️），没有 model / usage / prompt 渲染</td></tr>
+        <tr><td>原因</td><td>没指定 <code>as_type="generation"</code></td></tr>
+        <tr><td>修法</td><td>改 <code>@observe(as_type="generation", name="...")</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>坑 7：compile 变量名拼错</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>占位符 <code>{{criticlevel}}</code> 原样保留，输出 <code>"As an {{criticlevel}} movie critic..."</code></td></tr>
+        <tr><td>原因</td><td>compile() 参数名拼错（<code>critical_level</code> vs <code>criticlevel</code>）</td></tr>
+        <tr><td>修法</td><td>加 unit test 校验 <code>compile()</code> 后没有 <code>{{</code> 残留</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code>def test_prompt_compile():
+    compiled = p.compile(criticlevel="harsh", movie="Dune 2")
+    assert "{{" not in compiled, f"未替换的占位符: {compiled}"</code></pre>
+
+    <h3>坑 8：改 prompt 后立即查 trace 没生效</h3>
+    <table>
+      <thead><tr><th></th><th>详情</th></tr></thead>
+      <tbody>
+        <tr><td>现象</td><td>UI 切 label 后，前几条 trace 还在用旧版</td></tr>
+        <tr><td>原因</td><td>客户端缓存未过期（默认 60s）</td></tr>
+        <tr><td>修法</td><td>等 TTL，或设 <code>cache_ttl_seconds=0</code> 立即生效</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. 调试 SOP</h2>
+
+    <p>遇到问题，按下面顺序查：</p>
+
+    <table>
+      <thead><tr><th>问题类型</th><th>第一步</th><th>第二步</th></tr></thead>
+      <tbody>
+        <tr><td>UI 看不到 trace</td><td>检查 <code>flush()</code> 是否调用</td><td>检查 API key 是否正确</td></tr>
+        <tr><td>trace 没 prompt 徽章</td><td>确认 <code>update_current_generation(prompt=...)</code> 传的是对象</td><td>确认 <code>@observe(as_type="generation")</code></td></tr>
+        <tr><td>变量没替换</td><td>检查占位符和传参 key 是否完全一致</td><td>加 unit test</td></tr>
+        <tr><td>Token 数不对</td><td>检查 <code>usage_details</code> 参数名（不是 <code>usage）</code></td><td>检查 <code>resp.usage_metadata</code> 是否非空</td></tr>
+        <tr><td>改了 prompt 线上没变</td><td>等缓存过期（默认 60s）</td><td>检查 <code>cache_ttl_seconds</code> 配置</td></tr>
+        <tr><td><code>PromptNotFoundError</code></td><td>检查 UI 上 Labels 栏有没有 <code>production</code></td><td>检查 prompt 名拼写</td></tr>
+        <tr><td>fallback 路径没 link</td><td>这是设计如此</td><td>查 Langfuse web 日志</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3. 5 个反直觉但正确的认知</h2>
+
+    <table>
+      <thead><tr><th>#</th><th>反直觉的事</th><th>实际情况</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>"默认取最新版本"</td><td>默认取 <code>production</code> label 的版本</td></tr>
+        <tr><td>2</td><td>"一个 label 只能挂一个版本"</td><td>除 <code>production</code> 和 <code>latest</code> 外，其他 label 可以多版本同时挂</td></tr>
+        <tr><td>3</td><td>"audit_logs 记所有改动"</td><td>当前只审计 <code>create</code>，label 切换不审计</td></tr>
+        <tr><td>4</td><td>"UI 切 label 立刻生效"</td><td>有缓存延迟（默认 60s）</td></tr>
+        <tr><td>5</td><td>"fallback 会建立 link"</td><td>不会（设计如此）</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4. lesson 0004 关联踩坑归档</h2>
+
+    <p>详细原因分析和 evidence 见 learning-record：</p>
+
+    <ul>
+      <li><a href="../learning-records/0006-hello-trace-custom-openai-client.md">learning-record 0006</a>：<code>from langfuse.openai import openai</code> 的副作用 import 真相</li>
+      <li><a href="../learning-records/0007-prompt-management-three-pitfalls.md">learning-record 0007</a>：v3→v4 边界三件事（prompt 对象类型 / 参数名 / events_only 模式）</li>
+    </ul>
+
+    <h2>5. 一页打印版</h2>
+
+    <pre><code>┌─ 8 个常见坑速查 ─────────────────────────────────┐
+│ 1. prompt=字符串 → 改 prompt=对象 │
+│ 2. usage= → 改 usage_details= │
+│ 3. 默认取最新 → 实际取 production label │
+│ 4. 引用 latest label → 裸奔发版 │
+│ 5. create 时打 production → 新版没验证就上线 │
+│ 6. @observe() → 改 as_type="generation" │
+│ 7. compile 参数名拼错 → unit test 校验 │
+│ 8. 改 prompt 立刻生效 → 等 60s 缓存过期 │
+└─────────────────────────────────────────────────┘
+┌─ 5 个反直觉但正确 ─────────────────────────────────┐
+│ 1. 默认 production不是 latest │
+│ 2. 除 production/latest 外其他 label 可多版本 │
+│ 3. audit_logs 只审计 create │
+│ 4. UI 切 label 有 60s 缓存延迟 │
+│ 5. fallback 不建立 link │
+└─────────────────────────────────────────────────┘
+⚠️ 调试 SOP：先查 prompt 名/label，再查参数名，最后查缓存</code></pre>
+
+    <footer class="lesson-footer">
+      相关：<a href="prompt-data-model.html">数据模型</a> · <a href="prompt-code-integration.html">代码接入</a> · <a href="prompt-operations-playbook.html">运维 SOP</a> · <a href="prompt-storage-internals.html">存储内部</a><br>
+      主课：<a href="../lessons/0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

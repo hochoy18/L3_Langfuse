@@ -1,0 +1,199 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 代码接入 · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html" class="active">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · PROMPT CODE INTEGRATION</div>
+      <h1>Prompt 代码接入</h1>
+      <div class="meta">4 个核心 SDK 调用 + @observe 装饰器 + 6 种 link 模式 + 绑定本质。</div>
+    </header>
+
+    <div class="objective">
+      <strong>本页目标</strong><br>
+      一次性查清楚"在 Python 代码里怎么用 Langfuse Prompt Management"——所有 SDK 调用、所有装饰器选项、所有把 prompt 链接到 trace 的姿势。
+    </div>
+
+    <h2>1. 4 个核心 SDK 调用</h2>
+
+    <pre><code>from langfuse import get_client
+lf = get_client()
+
+# 1. 创建（带 label + config + commit_message）
+lf.create_prompt(
+    name="movie-critic",
+    type="text",
+    prompt="As a {{criticlevel}} movie critic, give a one-line take on {{movie}}.",
+    labels=["production"],
+    config={"temperature": 0.7, "model": "MiniMax-M3"},
+    commit_message="initial version",
+)
+
+# 2. 获取（默认取 production）
+p = lf.get_prompt("movie-critic")              # 取 production
+p = lf.get_prompt("movie-critic", label="staging")
+p = lf.get_prompt("movie-critic", version=3)   # 不推荐
+
+# 3. 编译（替换 {{var}}）
+compiled = p.compile(criticlevel="harsh", movie="Dune 2")
+
+# 4. 修改 label（生产/回滚/A/B 用）
+lf.update_prompt(
+    name="movie-critic",
+    version=2,
+    new_labels=["production"],   # ⚠️ 全量替换，漏写 = 丢 label
+)</code></pre>
+
+    <h2>2. PromptClient 对象字段</h2>
+
+    <table>
+      <thead><tr><th>属性</th><th>类型</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>p.name</code></td><td>str</td><td>"movie-critic"</td></tr>
+        <tr><td><code>p.version</code></td><td>int</td><td>1</td></tr>
+        <tr><td><code>p.labels</code></td><td>list[str]</td><td>["production"]</td></tr>
+        <tr><td><code>p.config</code></td><td>dict</td><td>{"temperature": 0.7, "model": "..."}</td></tr>
+        <tr><td><code>p.tags</code></td><td>list[str]</td><td>[]</td></tr>
+        <tr><td><code>p.commit_message</code></td><td>str | None</td><td>"initial version"</td></tr>
+        <tr><td><code>p.is_fallback</code></td><td>bool</td><td>True = 用了本地 fallback（不会建 link）</td></tr>
+        <tr><td><code>p.prompt</code></td><td>str / list</td><td>text=字符串 / chat=messages数组</td></tr>
+      </tbody>
+    </table>
+
+    <h2>3. <code>@observe(as_type="generation", name="...")</code> 详解</h2>
+
+    <table>
+      <thead><tr><th>参数</th><th>作用</th><th>不传会怎样</th></tr></thead>
+      <tbody>
+        <tr><td><code>as_type="generation"</code></td><td>标记为 LLM 调用节点（多 model/usage/prompt 专属字段）</td><td>用默认 span → UI 没这些字段的渲染</td></tr>
+        <tr><td><code>name="ask-critic"</code></td><td>UI 显示名</td><td>默认用 Python 函数名（往往不清晰）</td></tr>
+        <tr><td><code>metadata=...</code></td><td>一次性 metadata dict</td><td>—</td></tr>
+        <tr><td><code>tags=...</code></td><td>一次性 tags list</td><td>—</td></tr>
+        <tr><td><code>capture_input=False</code></td><td>是否自动捕获函数 args</td><td>默认 False（手动控制更好）</td></tr>
+        <tr><td><code>user_id / session_id / trace_name</code></td><td>透传到外层 trace</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>@observe 自动干的事</strong>：</p>
+    <ol>
+      <li>函数进入 → 创建 observation + 绑当前 trace_id</li>
+      <li>函数正常返回 → 标记 <code>level=DEFAULT</code>、设置 <code>end_time</code>、异步上报</li>
+      <li>函数抛异常 → 标记 <code>level=ERROR</code>、<code>statusMessage</code> 填异常文本</li>
+      <li>中间所有 <code>update_current_*</code> 自动归属到这条 observation</li>
+    </ol>
+
+    <h2>4. 6 种 link 方式（prompt ↔ trace）</h2>
+
+    <table>
+      <thead><tr><th>集成</th><th>link 怎么传</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Langfuse SDK 装饰器</strong></td><td><code>update_current_generation(prompt=p)</code></td></tr>
+        <tr><td><strong>Langfuse SDK context manager</strong></td><td><code>start_as_current_observation(..., prompt=p)</code></td></tr>
+        <tr><td><strong>OpenAI SDK (Python)</strong></td><td><code>openai.chat.completions.create(..., langfuse_prompt=p)</code></td></tr>
+        <tr><td><strong>OpenAI SDK (JS/TS)</strong></td><td><code>observeOpenAI(client, { langfusePrompt })</code></td></tr>
+        <tr><td><strong>LangChain</strong></td><td><code>PromptTemplate(..., metadata={"langfuse_prompt": p})</code></td></tr>
+        <tr><td><strong>Vercel / LiteLLM 等三方</strong></td><td><code>with propagate_attributes(prompt=p):</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>所有方式的核心都是同一个——<strong>传 PromptClient 对象，不是字符串</strong>。让 Langfuse 拿到 <code>.name</code> / <code>.version</code> 建立版本链接。</p>
+
+    <h2>5. 3 种"传 prompt"的位置含义</h2>
+
+    <table>
+      <thead><tr><th>位置</th><th>何时 link 生效</th><th>适用</th></tr></thead>
+      <tbody>
+        <tr><td><code>update_current_generation</code></td><td>LLM 调用之后</td><td>默认场景</td></tr>
+        <tr><td><code>start_observation(prompt=)</code></td><td>observation 创建瞬间</td><td>一次性 context</td></tr>
+        <tr><td><code>metadata.langfuse_prompt</code></td><td>框架读 metadata 时（callback）</td><td>框架集成</td></tr>
+      </tbody>
+    </table>
+
+    <h2>6. 绑定的本质</h2>
+
+    <p><strong>绑定 = 写 3 个字段到 generation 节点：</strong></p>
+
+    <pre><code>promptName    = "movie-critic"   ← 来自 PromptClient.name
+promptVersion = 1                ← 来自 PromptClient.version
+promptId      = "fc9cdbfb-..."   ← 来自 PromptClient.id</code></pre>
+
+    <p>写进去 = 绑定建立；不写 = 绑定没建。</p>
+
+    <h2>7. 完整 demo 骨架</h2>
+
+    <pre><code>from langfuse import get_client, observe
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="...", api_key=..., base_url=...)
+lf = get_client()
+
+@observe(as_type="generation", name="ask-critic")
+def ask(criticlevel: str, movie: str) -> str:
+    # 1. 拿 prompt
+    p = lf.get_prompt("movie-critic")
+    compiled = p.compile(criticlevel=criticlevel, movie=movie)
+
+    # 2. 第一次 update：建立 link + 记 model
+    lf.update_current_generation(
+        prompt=p,                                # ← 必须传对象，不是字符串
+        model=p.config.get("model", "..."),
+    )
+
+    # 3. 调 LLM
+    resp = llm.invoke([
+        {"role": "system", "content": compiled},
+        {"role": "user", "content": movie},
+    ])
+
+    # 4. 第二次 update：记 token
+    usage_md = resp.usage_metadata or {}
+    lf.update_current_generation(
+        usage_details={                          # ← 参数名是 usage_details 不是 usage
+            "input_tokens": usage_md.get("input_tokens", 0),
+            "output_tokens": usage_md.get("output_tokens", 0),
+            "total_tokens": usage_md.get("total_tokens", 0),
+        },
+    )
+    return resp.content</code></pre>
+
+    <footer class="lesson-footer">
+      相关：<a href="prompt-data-model.html">数据模型</a> · <a href="prompt-operations-playbook.html">运维 SOP</a> · <a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a><br>
+      主课：<a href="../lessons/0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

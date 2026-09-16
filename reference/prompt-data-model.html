@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 数据模型 · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="prompt-data-model.html" class="active">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · PROMPT DATA MODEL</div>
+      <h1>Prompt 数据模型</h1>
+      <div class="meta">Version / Label / 不可变性 / 默认行为。Lesson 0004 的配套深度参考。</div>
+    </header>
+
+    <div class="objective">
+      <strong>本页目标</strong><br>
+      把 Langfuse Prompt Management 的核心抽象讲透：Prompt 对象由哪几部分组成、Version 和 Label 各自的角色、默认行为到底是什么、哪些字段可变哪些不可变。
+    </div>
+
+    <h2>1. Prompt 对象 = 5 个组成部分</h2>
+
+    <table>
+      <thead><tr><th>部分</th><th>例子</th><th>说明</th></tr></thead>
+      <tbody>
+        <tr><td><strong>name</strong></td><td><code>"movie-critic"</code></td><td>跨版本共用的逻辑键，全局唯一</td></tr>
+        <tr><td><strong>version</strong></td><td><code>1</code>、<code>2</code>、<code>3</code>...</td><td>name 内单调递增整数</td></tr>
+        <tr><td><strong>prompt（内容）</strong></td><td><code>"As a {{criticlevel}}..."</code></td><td>text = 字符串 / chat = messages 数组</td></tr>
+        <tr><td><strong>config</strong></td><td><code>{"model": "gpt-4o", "temperature": 0.7}</code></td><td>模型参数，跟 prompt 绑死</td></tr>
+        <tr><td><strong>labels</strong></td><td><code>["production"]</code></td><td>部署指针，唯一可变字段</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. Version vs Label（核心二元论）</h2>
+
+    <table>
+      <thead><tr><th></th><th>Version</th><th>Label</th></tr></thead>
+      <tbody>
+        <tr><td>谁维护</td><td>Langfuse 自动递增</td><td>你手动管理</td></tr>
+        <tr><td>可变性</td><td><strong>不可变</strong>（内容创建后永远不动）</td><td><strong>可变</strong>（随时换）</td></tr>
+        <tr><td>数量</td><td>每次改动 +1</td><td>一个 prompt 上可以有多个 label</td></tr>
+        <tr><td>作用</td><td>历史快照</td><td>部署指针</td></tr>
+        <tr><td>代码引用</td><td>❌不用</td><td>✅<code>get_prompt(name)</code> 默认取 production</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>铁律</strong>：<em>改 prompt = 发新版本；切换部署 = 改 label。代码只引用 label。</em></p>
+
+    <h2>3. 不可变 vs 可变字段（实测表）</h2>
+
+    <table>
+      <thead><tr><th>字段</th><th>创建后能改吗</th><th>怎么改</th></tr></thead>
+      <tbody>
+        <tr><td><code>name</code></td><td>❌</td><td>不可改</td></tr>
+        <tr><td><code>version</code></td><td>❌</td><td>不可改</td></tr>
+        <tr><td><code>type</code>（text/chat）</td><td>❌</td><td>要换就建新 prompt 名</td></tr>
+        <tr><td><code>prompt</code> 内容</td><td>❌</td><td>发新版</td></tr>
+        <tr><td><code>config</code></td><td>❌</td><td>发新版</td></tr>
+        <tr><td><code>commit_message</code></td><td>❌</td><td>发新版</td></tr>
+        <tr><td><code>created_at</code></td><td>❌</td><td>—</td></tr>
+        <tr><td><strong><code>labels</code></strong></td><td>✅ <strong>可变</strong></td><td><code>update_prompt()</code> 或 UI 编辑</td></tr>
+        <tr><td><code>tags</code></td><td>✅ 可变</td><td>同上</td></tr>
+        <tr><td><code>updated_at</code></td><td>自动</td><td>任何字段被改时更新</td></tr>
+      </tbody>
+    </table>
+
+    <h2>4. Label 机制</h2>
+
+    <h3>4.1 4 类 label</h3>
+    <table>
+      <thead><tr><th>Label</th><th>谁维护</th><th>同时可挂在几个版本</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>production</code></td><td>手动</td><td><strong>1 个</strong></td><td>线上跑这版</td></tr>
+        <tr><td><code>latest</code></td><td><strong>Langfuse 自动</strong></td><td><strong>1 个</strong>（强约束）</td><td>总是最新版本</td></tr>
+        <tr><td><code>staging</code></td><td>手动</td><td>可以多</td><td>预发环境</td></tr>
+        <tr><td>任意自定义</td><td>手动</td><td>可以多</td><td>A/B / 灰度 / 租户</td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.2 默认行为（最常被误解的点）</h3>
+    <pre><code>get_prompt(name)            # → 拉取带 "production" label 的版本
+get_prompt(name, label="latest")  # → 拉取最新版本
+get_prompt(name, version=3) # → 拉取指定版本号</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 纠错：</strong><code>get_prompt(name)</code> 不传任何参数时，<strong>不是拉取版本号最大的那个</strong>，而是拉取带 <code>production</code> label 的版本。这是设计上的安全机制——强制要求显式部署。
+    </div>
+
+    <h3>4.3 <code>latest</code> 的自动维护规则</h3>
+    <p>创建 v2 时，Langfuse 在一个事务里同时干三件事：</p>
+    <pre><code>1. 插入 v2 行
+2. v2.labels += ["latest"]      ← 自动加
+3. v1.labels -= ["latest"]      ← 之前有就摘掉</code></pre>
+
+    <p>所以 v1 的 <code>updated_at</code> 会等于 v2 的 <code>created_at</code>——这是"latest 自动转移"的物理痕迹。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ <code>latest</code> 是 SDK 硬保护</strong>（实测发现，文档没明说）：
+      <pre><code># ❌ 试图手动改 latest → 服务端 400 拒绝
+lf.update_prompt(version=2, new_labels=["latest"])
+# Error: "Label 'latest' is always assigned to the latest prompt version"</code></pre>
+      任何试图通过 <code>update_prompt</code> 改 <code>latest</code> label 的请求都会被服务端拦截。
+    </div>
+
+    <h3>4.4 <code>production</code> 的单一性</h3>
+    <table>
+      <thead><tr><th>问题</th><th>答案</th></tr></thead>
+      <tbody>
+        <tr><td>只有一个版本带 production 吗？</td><td>✅ 是</td></tr>
+        <tr><td>只有一个版本带 staging 吗？</td><td>❌ 不一定（可以多）</td></tr>
+        <tr><td>production 和 staging 能同时挂在不同版本吗？</td><td>✅ 可以</td></tr>
+      </tbody>
+    </table>
+
+    <p>常见的多 label 状态：</p>
+    <pre><code>v1: labels = ['production']            ← 线上
+v2: labels = ['staging', 'latest']      ← 预发测试最新</code></pre>
+
+    <h3>4.5 <code>update_prompt</code> 的全量替换语义</h3>
+    <pre><code>lf.update_prompt(name="movie-critic", version=1, new_labels=["production", "archived"])
+# v1.labels 现在 = ["production", "archived"]
+# 是【新状态全量替换】，不是【增量追加】
+
+lf.update_prompt(name="movie-critic", version=1, new_labels=["archived"])
+# ⚠️ v1.labels 现在 = ["archived"]（production 被摘走了！）</code></pre>
+
+    <h2>5. 3 种动态内容插入</h2>
+
+    <table>
+      <thead><tr><th>方式</th><th>语法</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Variables</strong></td><td><code>{{var}}</code> + <code>p.compile(var=...)</code></td><td>文本插值（lesson 0004 教的）</td></tr>
+        <tr><td><strong>Prompt References</strong></td><td><code>@@other-prompt-name</code></td><td>复用其他 prompt（lesson 5+ 详细讲）</td></tr>
+        <tr><td><strong>Message Placeholders</strong></td><td><code>{{placeholder}}</code> 传 messages 数组</td><td>chat history 多轮对话</td></tr>
+      </tbody>
+    </table>
+
+    <h2>6. Caching 副作用</h2>
+
+    <p>Langfuse 客户端缓存 prompt（默认 60s），改 prompt 后前几条 trace 仍可能用旧版。</p>
+
+    <table>
+      <thead><tr><th>操作</th><th>行为</th></tr></thead>
+      <tbody>
+        <tr><td>默认</td><td>第一次拉后缓存 60s</td></tr>
+        <tr><td>关闭缓存</td><td><code>get_prompt(name, cache_ttl_seconds=0)</code></td></tr>
+        <tr><td>fallback 参数</td><td><code>get_prompt(name, fallback="...")</code> 拉取失败时返回本地字符串</td></tr>
+        <tr><td><code>is_fallback=True</code></td><td><strong>不会建立 prompt link</strong>（设计如此）</td></tr>
+      </tbody>
+    </table>
+
+    <footer class="lesson-footer">
+      相关：<a href="prompt-code-integration.html">代码接入</a> · <a href="prompt-operations-playbook.html">运维 SOP</a> · <a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a> · <a href="glossary.html">术语表</a><br>
+      主课：<a href="../lessons/0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

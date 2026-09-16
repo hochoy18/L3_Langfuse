@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0002 · SDK 最小接入 + Hello Trace</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="0002-minimal-sdk-hello-trace.html" class="active">0002 · Hello Trace</a></li>
+      <li><a href="0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li><a href="0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html">0005 · 评分(3/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../reference/prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="../reference/prompt-code-integration.html">代码接入</a></li>
+      <li><a href="../reference/prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="../reference/prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0002 · SDK</div>
+      <h1>SDK 最小接入：跑通第一条 Trace</h1>
+      <div class="meta">预计 20 分钟 · 难度 ★★☆☆☆ · 产出：UI 上看到第一条 hello trace</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节目标</strong><br>
+      用 <code>@observe</code> 装饰器 + <code>langfuse.openai</code> auto-instrumentation，把一次最简单的 OpenAI 调用埋点。跑完后回到 UI 能看到一条完整的 Trace，含输入、输出、模型、token。
+    </div>
+
+    <h2>1. 装依赖</h2>
+    <pre><code>pip install "langfuse>=3.0" openai python-dotenv</code></pre>
+
+    <p>确保你 lesson 1 里的 <code>.env</code> 文件在本目录，4 个变量都有。</p>
+
+    <h2>2. 第一个脚本</h2>
+    <p>新建 <code>hello_trace.py</code>，逐行敲一遍（别复制粘贴，敲的过程会注意到细节）：</p>
+
+    <pre><code># hello_trace.py
+import os
+from dotenv import load_dotenv
+load_dotenv()
+
+from langfuse import observe
+from langfuse.openai import openai   # ← 注意：不是 import openai
+
+@observe()                          # ← 装饰器，标记一个 Trace
+def ask(question: str) -> str:
+    resp = openai.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": question}],
+    )
+    return resp.choices[0].message.content
+
+if __name__ == "__main__":
+    print(ask("一句话讲清楚什么是 Langfuse。"))
+    from langfuse import get_client
+    get_client().flush()             # ← 短脚本必加，否则 trace 还没发出去进程就退了</code></pre>
+
+    <h3>三个关键点（划重点）</h3>
+    <table>
+      <thead><tr><th>关键</th><th>为什么</th></th></tr></thead>
+      <tbody>
+        <tr><td><code>from langfuse.openai import openai</code></td><td>这是 Langfuse 的 OpenAI 兼容客户端。任何用这个 client 发的请求都会被自动埋点成 <strong>Generation</strong> 节点。</td></tr>
+        <tr><td><code>@observe()</code></td><td>包在函数外，标记一个 <strong>Trace</strong>。函数内部的 LLM 调用会作为子节点挂在这个 Trace 下。</td></tr>
+        <tr><td><code>get_client().flush()</code></td><td>SDK 是异步上报的。脚本进程退出前如果不 flush，最新一条 trace 可能丢失。生产服务一般不用调。</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>很多人写 <code>import openai</code>，这是错的——那是原生 OpenAI SDK，Langfuse 拦截不到。必须 <code>from langfuse.openai import openai</code>，得到的对象是 Langfuse 包装过的"看上去一样、用起来一样、但会顺手上报 trace"的版本。
+    </div>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑（非 OpenAI 提供商）：</strong>如果你用 Azure / 本地代理 / MiniMax / DeepSeek 等 OpenAI 兼容协议，<code>langfuse.openai</code> 拿到的 client 默认只读 <code>OPENAI_API_KEY</code> / <code>OPENAI_BASE_URL</code>，而你的 env 名往往是别的（比如 <code>MINIMAX_API_KEY</code>）。修法：要么在脚本顶部桥接 env 变量，要么显式 <code>OpenAI(api_key=..., base_url=...)</code> 构造客户端。详见 <a href="../learning-records/0006-hello-trace-custom-openai-client.md">learning-record 0006</a>。
+    </div>
+
+    <h2>3. 跑起来 + 看 UI</h2>
+
+    <pre><code>python hello_trace.py</code></pre>
+
+    <p>看到控制台打印答案后，浏览器切到 <code>localhost:3000</code> → 项目 <code>agent-sandbox</code> → 左侧 <em>Tracing</em>。你应该看到一条这样的记录：</p>
+
+    <pre><code>Trace: ask
+└─ Generation: gpt-4o-mini
+   ├─ input:  [{role:user, content: 一句话讲清楚…}]
+   ├─ output: Langfuse 是一个开源的 LLM 可观测性…
+   ├─ tokens: 47 in / 31 out
+   └─ latency: 1.2s</code></pre>
+
+    <p>如果没看到，最常见两个原因：</p>
+    <ul>
+      <li>忘了 <code>flush()</code>，或进程被杀得太快</li>
+      <li>API Key 拷错了 → 看终端有没有 <code>401</code></li>
+    </ul>
+
+    <h2>4. 关键 SDK 概念提前剧透</h2>
+    <p>这节课只用到了 <code>@observe</code> 和 <code>langfuse.openai</code>。后面会用到的：</p>
+    <table>
+      <thead><tr><th>API</th><th>用途</th><th>用在哪节课</th></th></tr></thead>
+      <tbody>
+        <tr><td><code>get_client().update_current_trace(...)</code></td><td>给 Trace 加 user_id / session_id / tags / metadata</td><td>Lesson 4</td></tr>
+        <tr><td><code>@observe(as_type="generation", name="...")</code></td><td>把任意函数标成 Generation 而不是 Span</td><td>Lesson 3</td></tr>
+        <tr><td><code>get_client().start_as_current_observation(...)</code></td><td>上下文管理器，比装饰器更灵活</td><td>Lesson 3</td></tr>
+        <tr><td><code>propagate_attributes(...)</code></td><td>把 user_id 等属性传递到所有子 Observation</td><td>Lesson 4</td></tr>
+        <tr><td><code>get_client().score(...)</code></td><td>给 Trace 打分</td><td>Lesson 5</td></tr>
+      </tbody>
+    </table>
+
+    <div class="task">
+      <strong>🎯 动手任务（10 分钟）</strong><br>
+      <ol>
+        <li>把上面的 <code>hello_trace.py</code> 跑通，确认 UI 出现一条 Trace</li>
+        <li>改一下 <code>ask()</code>，让一次调用里嵌套两次 OpenAI 请求（比如先问"首都是哪"，再问"写一首关于这个首都的诗"）。观察 UI 中两个 Generation 如何挂在同一个 Trace 下</li>
+        <li>在 UI 上点开这条 Trace，记录你看到的字段：input / output / model / tokens / latency</li>
+      </ol>
+    </div>
+
+    <h2>5. 一句话总结</h2>
+    <p><strong>两个 import + 一个装饰器 + 一次 flush = 第一条 Trace。</strong></p>
+    <p>下一节我们把这个最小模式塞进一个真正的 LangGraph ReAct Agent 里，看多步决策的 trace 长什么样。</p>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码做版本管理 →</a><br>
+      引用资源：<a href="../RESOURCES.md">RESOURCES.md · OpenAI Integration</a> · <a href="../reference/glossary.html">Glossary · Trace / Generation</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

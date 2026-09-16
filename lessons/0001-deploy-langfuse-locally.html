@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0001 · 本地部署 Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="0001-deploy-langfuse-locally.html" class="active">0001 · 部署</a></li>
+      <li><a href="0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li><a href="0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html">0005 · 评分(3/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../reference/prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="../reference/prompt-code-integration.html">代码接入</a></li>
+      <li><a href="../reference/prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="../reference/prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0001 · DEPLOY</div>
+      <h1>本地一键部署 Langfuse</h1>
+      <div class="meta">预计 30 分钟 · 难度 ★☆☆☆☆ · 产出：本地 UI + 一对 API Key</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节目标</strong><br>
+      在 <code>localhost:3000</code> 跑起 Langfuse，创建你的第一个 Project，并拿到 <code>pk-lf-...</code> / <code>sk-lf-...</code> 一对凭据，为 lesson 2 的 SDK 接入做准备。
+    </div>
+
+    <h2>1. 架构速览</h2>
+    <p>Docker Compose 一把拉起 4 个容器，互相之间是这样的关系：</p>
+
+    <pre><code>┌──────────────┐    ┌──────────────┐
+│  langfuse-web│◄──►│   postgres   │   元数据 / trace / score
+│   (UI+API)   │    └──────────────┘
+│   :3000      │    ┌──────────────┐
+└──────┬───────┘◄──►│    redis     │   队列 / 缓存
+       │           └──────────────┘
+       │           ┌──────────────┐
+       └──────────►│    minio     │   对象存储（multipart upload）
+                   │    :9090     │
+                   └──────────────┘</code></pre>
+
+    <p>只有 <code>langfuse-web</code> 对外暴露 <strong>:3000</strong>。其余三个组件在 Docker 内部网络通讯，外部不能直接访问。</p>
+
+    <h2>2. 环境要求</h2>
+    <table>
+      <thead><tr><th>组件</th><th>版本</th><th>检查命令</th></tr></thead>
+      <tbody>
+        <tr><td>Docker Desktop</td><td>≥ 4.20（含 compose v2）</td><td><code>docker --version</code></td></tr>
+        <tr><td>内存</td><td>≥ 8 GiB 空闲</td><td>Activity Monitor 自查</td></tr>
+        <tr><td>磁盘</td><td>≥ 10 GiB 空闲</td><td><code>df -h .</code></td></tr>
+        <tr><td>端口</td><td>3000 未占用</td><td><code>lsof -i :3000</code></td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>Docker Desktop 默认给 4 GiB 内存，启动 postgres + redis + minio + web 会很卡甚至起不来。打开 <em>Settings → Resources → Memory</em>，调到 <strong>≥ 8 GiB</strong>，再重启 Docker。
+    </div>
+
+    <h2>3. 一键启动</h2>
+    <p>只需要 <code>docker-compose.yml</code> 这一个文件，<strong>不需要 clone 整个 langfuse 仓库</strong>（那个仓库里有几千行无关代码）。两个轻量方案：</p>
+
+    <h3>方案 A：直接从 GitHub raw 下载（最快）</h3>
+    <pre><code>mkdir ~/langfuse-local && cd ~/langfuse-local
+curl -O https://raw.githubusercontent.com/langfuse/langfuse/main/docker-compose.yml
+
+# 把所有 # CHANGEME 替换成 64 位随机串
+sed -i '' 's/CHANGEME/'"$(openssl rand -hex 32)"'/g' docker-compose.yml
+
+# 后台启动 + 看日志
+docker compose up -d
+docker compose logs -f langfuse-web</code></pre>
+
+    <h3>方案 B：手写最小 compose（v4 兼容，5 件套）</h3>
+    <p>新建 <code>docker-compose.yml</code>。v4 时代 web 启动会硬性校验 clickhouse 连通性，所以 clickhouse 不能省；worker / minio 可省：</p>
+    <pre><code>services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: changeme
+      POSTGRES_DB: postgres
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+    volumes: ["chdata:/var/lib/clickhouse"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+    # ★ 关键：限制 clickhouse 不要抢光 CPU
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G
+
+  redis:
+    image: redis:7-alpine
+    command: ["--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+
+  langfuse-web:
+    image: langfuse/langfuse:4
+    ports: ["3000:3000"]
+    depends_on:
+      postgres:    { condition: service_healthy }
+      redis:       { condition: service_healthy }
+      clickhouse:  { condition: service_healthy }
+    environment:
+      DATABASE_URL: postgresql://postgres:changeme@postgres:5432/postgres
+      NEXTAUTH_SECRET: changeme
+      SALT: changeme
+      ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: clickhouse
+      CLICKHOUSE_PASSWORD: clickhouse
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ""
+      TELEMETRY_ENABLED: "false"
+
+volumes:
+  pgdata:
+  chdata:</code></pre>
+
+    <p>这个版本 <strong>省了 worker 和 minio</strong>：能跑 UI + Trace 写入；在线评估、score 删除、大 payload 上传功能受限。生产或要做评估时把 worker 加回来。</p>
+
+    <p>等到 <code>langfuse-web</code> 日志里出现 <code>Ready</code>，整个 stack 就起来了。首次启动约 2-3 分钟（要下载镜像 + clickhouse 做 schema 迁移）。</p>
+
+    <div class="callout">
+      <strong>说明（仅方案 A）：</strong><code>sed</code> 那一行会把官方 compose 里所有标了 <code># CHANGEME</code> 的密码、salt、token 替换成 64 位随机串。生产环境务必这样做；本地学习也可以偷懒直接用默认值——但别把 compose 文件 commit 到 Git。
+    </div>
+
+    <h2>4. 访问与初始化</h2>
+
+    <ol>
+      <li>浏览器打开 <a href="http://localhost:3000">http://localhost:3000</a></li>
+      <li>第一次进入会让你注册一个 <strong>本地管理员账号</strong>（邮箱 + 密码，自托管模式下这个账号就是 Organization Owner）</li>
+      <li>登录后默认进入一个空 Organization。点 <em>Settings → API Keys</em> → <em>Create new key</em></li>
+      <li>系统会显示一对 Key：
+        <pre><code>Public Key:   pk-lf-xxxxxxxxxxxxxxxxxxxx
+Secret Key:   sk-lf-xxxxxxxxxxxxxxxxxxxx</code></pre>
+      </li>
+    </ol>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑（必看）：</strong><code>Secret Key</code> <strong>只显示这一次</strong>。关掉弹窗就再也看不到了，必须重新生成。先把两个 Key 复制下来存到本地 <code>.env</code> 里。
+    </div>
+
+    <p>推荐的本地 <code>.env</code> 写法（gitignore 掉）：</p>
+
+    <pre><code>LANGFUSE_PUBLIC_KEY=pk-lf-xxxxxxxxxxxxxxxxxxxx
+LANGFUSE_SECRET_KEY=sk-lf-xxxxxxxxxxxxxxxxxxxx
+LANGFUSE_HOST=http://localhost:3000
+OPENAI_API_KEY=sk-xxxxxxxxxxxxxxxxxxxx</code></pre>
+
+    <h2>5. 验证部署</h2>
+    <p>打开新终端，跑一次 SDK ping，确认认证链路通：</p>
+
+    <pre><code>pip install langfuse
+python -c "
+from langfuse import get_client
+lf = get_client()
+print('auth ok, host =', lf.base_url)
+"</code></pre>
+
+    <p>如果打印 <code>auth ok, host = http://localhost:3000</code> 就 OK。报错 <code>401 Unauthorized</code> 通常是 key 拷错了；报错 <code>Connection refused</code> 是容器没起。</p>
+
+    <h2>6. 常用运维命令</h2>
+    <table>
+      <thead><tr><th>场景</th><th>命令</th></tr></thead>
+      <tbody>
+        <tr><td>看所有容器状态</td><td><code>docker compose ps</code></td></tr>
+        <tr><td>重启 web（升级后常用）</td><td><code>docker compose up -d --pull always langfuse-web</code></td></tr>
+        <tr><td>停止并保留数据</td><td><code>docker compose down</code></td></tr>
+        <tr><td>停止并<strong>删库</strong>（慎用）</td><td><code>docker compose down -v</code></td></tr>
+        <tr><td>看资源占用（找谁是资源大户）</td><td><code>docker stats</code></td></tr>
+        <tr><td>进 redis 看当前客户端连接</td><td><code>docker compose exec redis redis-cli CLIENT LIST</code></td></tr>
+        <tr><td>看 postgres 数据卷</td><td><code>docker volume ls | grep langfuse</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>7. 真实踩坑记录：clickhouse 抢 CPU 导致 worker 报 redis Socket timeout</h2>
+    <p>这一节是用户亲历的坑，写在这里让后来人少走弯路。完整 6 件套跑起来后，worker 日志可能持续刷这种错误：</p>
+
+    <pre><code>Queue job create-eval-queue errored: Error: Socket timeout.
+Expecting data, but didn't receive any in 30000ms.
+    at Timeout._onTimeout (.../ioredis/built/Redis.js:467:33)</code></pre>
+
+    <p><strong>表面看是 worker 连不上 redis，其实根因是 clickhouse 抢光了 CPU</strong>。诊断顺序：</p>
+
+    <ol>
+      <li><code>docker stats</code> 看 CPU 占用：clickhouse 容器 CPU 经常跳到 300-400%，瞬间阻塞同主机上的 redis 事件循环</li>
+      <li>进 redis 看 SLOWLOG：<code>docker compose exec redis redis-cli SLOWLOG GET 5</code> → 看到 <code>evalsha</code> 单条耗时 23 秒，说明 redis 真的被卡了</li>
+      <li>手动从 worker 容器 ping redis：<code>docker compose exec langfuse-worker-1 redis-cli -h redis ping</code> → 0ms 立即返回 → redis 本身没问题，问题在 clickhouse 抢资源</li>
+    </ol>
+
+    <div class="callout warn">
+      <strong>修复方案（任选其一）：</strong>
+      <ol>
+        <li><strong>给 clickhouse 限资源</strong>（推荐）：在 compose 的 clickhouse 段加
+          <pre><code>    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 1G</code></pre>
+          再 <code>docker compose up -d --force-recreate clickhouse</code>
+        </li>
+        <li><strong>切到 v3</strong>：v3 用老 clickhouse 镜像，资源占用略低，但官方主推 v4</li>
+        <li><strong>重启 Docker Desktop</strong>：临时释放内存压力，但治标不治本</li>
+      </ol>
+    </div>
+
+    <div class="callout">
+      <strong>用户实际修复方案：</strong><em>（待回填——用户告诉我是哪种）</em>
+    </div>
+
+    <div class="task">
+      <strong>🎯 动手任务（15 分钟）</strong><br>
+      <ol>
+        <li>用 <code>docker compose ps</code> 确认所有容器都在 <code>running</code>（v4 完整栈 6 个，方案 B 精简栈 4 个）</li>
+        <li>浏览器登录到 <code>localhost:3000</code>，创建一个名为 <code>agent-sandbox</code> 的 Project</li>
+        <li>在 Project 里 <em>Create new API key</em>，把 Public/Secret Key 复制到本地 <code>.env</code></li>
+        <li>跑上面的 SDK ping 脚本，看到 <code>auth ok</code></li>
+        <li>（可选）<code>docker stats</code> 看一眼资源占用，确认 clickhouse 不会跳到 400% CPU</li>
+      </ol>
+    </div>
+
+    <h2>8. 这一节埋下的关键概念</h2>
+    <ul>
+      <li><a href="../reference/glossary.html">Trace / Observation / Score</a> 这些概念会在 lesson 2 才会真正用到，这里先有个直觉即可</li>
+      <li>本节产出物：<strong>一对可用的 Key + 一个能登录的 UI</strong>。下一节我们要让第一条 Trace 出现在 UI 上</li>
+    </ul>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0002-minimal-sdk-hello-trace.html">Lesson 0002 · SDK 最小接入，跑通 hello trace →</a><br>
+      引用资源：<a href="../RESOURCES.md">RESOURCES.md · 自托管</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

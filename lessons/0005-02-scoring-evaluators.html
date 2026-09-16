@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0005 · Part 2 · 三种 Evaluator 实现</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt</a></li>
+      <li><a href="../lessons/0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html" class="active">0005 · 评分(2/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0005 · EVALUATION · PART 2 of 3</div>
+      <h1>三种 Evaluator 实现：SDK / Code / LLM-as-a-Judge</h1>
+      <div class="meta">预计 60 分钟 · 难度 ★★★★☆ · 涵盖 §4-6；Part 1 已讲 Score 4×4 矩阵与 Evaluator 一等公民概念，本节落地 3 种实现方式</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节 3 个目标</strong>
+      <ol>
+        <li>掌握<strong>两种 SDK 打分风格</strong>（上下文内 vs 低层 API）的取舍，能写内联 Evaluator 函数</li>
+        <li>能写 <strong>Code Evaluator</strong>（3 个常见规则 + 单测），理解其严格约束</li>
+        <li>能设计 <strong>LLM-as-a-Judge</strong>（prompt 三段式 + 解析 fallback），避开常见 anti-patterns</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>4. 手工 SDK 打分</h2>
+    <!-- ============================================================ -->
+
+    <h3>4.1 两种风格：上下文内 vs 低层 API</h3>
+    <p>Langfuse SDK 给你<strong>两种调用风格</strong>，对应你"在不在 observation 上下文里"的两种场景：</p>
+
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s2-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- 决策起点 -->
+      <rect x="280" y="20" width="200" height="50" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="380" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">在 observation 上下文里？</text>
+      <text x="380" y="60" text-anchor="middle" font-size="10" fill="#666" font-style="italic">即：当前有 active 的 span / generation？</text>
+
+      <!-- Yes 分支 -->
+      <line x1="380" y1="70" x2="180" y2="120" stroke="#2d7a3d" stroke-width="1.5" fill="none" marker-end="url(#s2-arr)"/>
+      <text x="248" y="98" font-size="11" fill="#2d7a3d" font-weight="700">YES</text>
+
+      <rect x="40" y="120" width="280" height="50" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="180" y="144" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">上下文内方法</text>
+      <text x="180" y="160" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#222">score_current_trace()</text>
+      <text x="180" y="174" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#222">score_current_span()</text>
+
+      <!-- No 分支 -->
+      <line x1="380" y1="70" x2="580" y2="120" stroke="#c0392b" stroke-width="1.5" fill="none" marker-end="url(#s2-arr)"/>
+      <text x="510" y="98" font-size="11" fill="#c0392b" font-weight="700">NO</text>
+
+      <rect x="440" y="120" width="280" height="50" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1.5"/>
+      <text x="580" y="144" text-anchor="middle" font-size="13" font-weight="700" fill="#c0392b">低层方法</text>
+      <text x="580" y="160" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#222">create_score(trace_id=...)</text>
+      <text x="580" y="174" text-anchor="middle" font-size="11" font-family="ui-monospace,monospace" fill="#222">create_score(session_id=...)</text>
+
+      <!-- 何时用哪种 -->
+      <text x="180" y="200" text-anchor="middle" font-size="10" fill="#666" font-style="italic">典型场景：</text>
+      <text x="180" y="216" text-anchor="middle" font-size="10" fill="#666">@observe 装饰的函数内</text>
+      <text x="180" y="230" text-anchor="middle" font-size="10" fill="#666">CallbackHandler 内部</text>
+      <text x="180" y="244" text-anchor="middle" font-size="10" fill="#666">start_as_current_observation 块内</text>
+
+      <text x="580" y="200" text-anchor="middle" font-size="10" fill="#666" font-style="italic">典型场景：</text>
+      <text x="580" y="216" text-anchor="middle" font-size="10" fill="#666">异步后台打分</text>
+      <text x="580" y="230" text-anchor="middle" font-size="10" fill="#666">跨 trace / 跨 session 评分</text>
+      <text x="580" y="244" text-anchor="middle" font-size="10" fill="#666">REST API / Browser SDK</text>
+
+      <!-- 底部提示 -->
+      <rect x="40" y="270" width="680" height="40" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="380" y="290" text-anchor="middle" font-size="11" fill="#8a6a17"><strong>经验法则</strong>：在 agent / ReAct 代码里用上下文内（自动找到 trace_id）；在 web 后端 / 异步 worker 用低层（手动传 trace_id）</text>
+    </svg>
+
+    <h3>4.2 上下文内打分：<code>score_current_trace</code> 与 <code>score_current_span</code></h3>
+
+    <p>在 <code>@observe</code> 装饰的函数里（或 <code>start_as_current_observation</code> 块内），当前活跃的 trace / span 自动可用——直接调 <code>score_current_*</code> 即可，<strong>不用手填 trace_id</strong>。</p>
+
+    <pre><code>from langfuse import observe, get_client
+
+@observe()
+def handle_user_question(question: str) -> str:
+    lf = get_client()
+
+    # 跑 LLM 拿答案
+    answer = call_llm(question)
+
+    # 直接给当前 trace 打分（自动绑定到当前 trace）
+    lf.score_current_trace(
+        name="user-feedback-prompt",
+        value=1,                   # BOOLEAN 类型，必须 0 或 1
+        data_type="BOOLEAN",
+        comment="auto: response generated successfully",
+    )
+    lf.score_current_trace(
+        name="response_length",
+        value=len(answer),          # NUMERIC 类型
+        data_type="NUMERIC",
+    )
+
+    return answer</code></pre>
+
+    <p><strong>逐行说明：</strong></p>
+    <ul>
+      <li><code>score_current_trace(...)</code>：在 observation 上下文内自动找到 <code>trace_id</code>，无需手填</li>
+      <li><code>name</code>：必须先在 UI Score Configs 里建过——否则 CATEGORICAL 会被服务端 400 拒绝</li>
+      <li><code>value</code>：必须按 <code>data_type</code> 走——BOOLEAN 必须是 0/1，NUMERIC 是 float</li>
+      <li><code>comment</code>：评分理由（≤ 500 字符）；LLM Judge 场景几乎必填</li>
+      <li>同一 trace 可以打多个 score：<code>score_current_trace</code> 调多次不覆盖</li>
+    </ul>
+
+    <p>如果想打给<strong>具体某个 observation</strong>（不是 trace），用 <code>score_current_span</code>：</p>
+
+    <pre><code>@observe()
+def handle_request(question: str):
+    lf = get_client()
+
+    # 进入一个嵌套 span
+    with lf.start_as_current_observation(as_type="span", name="preprocess") as span:
+        cleaned = preprocess(question)
+
+        # 打给这个 span（不是父 trace）
+        lf.score_current_span(
+            name="preprocess-cleaned-ratio",
+            value=len(cleaned) / len(question),
+            data_type="NUMERIC",
+        )</code></pre>
+
+    <h3>4.3 低层 API：<code>create_score</code> 的 4 个 parent 字段</h3>
+
+    <p>不在 observation 上下文里（异步 worker / web 后端 / 跨 trace 评分）→ 用低层 API。score 必须挂在某个 parent 上，<strong>4 选 1+</strong>：</p>
+
+    <table>
+      <thead><tr><th>parent</th><th>何时用</th><th>SDK 参数</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>trace_id</code></td>
+          <td>最常见；评价整次调用</td>
+          <td><code>create_score(trace_id="01H...")</code></td>
+        </tr>
+        <tr>
+          <td><code>observation_id</code></td>
+          <td>评价某个具体 step（必须同时给 <code>trace_id</code>）</td>
+          <td><code>create_score(trace_id=..., observation_id=...)</code></td>
+        </tr>
+        <tr>
+          <td><code>session_id</code></td>
+          <td>评价整个多轮会话（<strong>不与 trace 关联</strong>）</td>
+          <td><code>create_score(session_id="sess-...")</code></td>
+        </tr>
+        <tr>
+          <td><code>dataset_run_id</code></td>
+          <td>离线实验场景（0006 详讲）</td>
+          <td>experiment runner 自动填</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <pre><code>from langfuse import get_client
+
+lf = get_client()
+
+# 例 1：异步 worker 收到 trace_id 后打分
+async def score_worker(trace_id: str, output: str):
+    lf.create_score(
+        name="length-check",
+        value=len(output),
+        data_type="NUMERIC",
+        trace_id=trace_id,
+        comment="scored async 2 minutes after response",
+    )
+
+# 例 2：跨多 trace 汇总，挂到 session 级
+def score_session(session_id: str, all_outputs: list):
+    avg_quality = sum(quality(o) for o in all_outputs) / len(all_outputs)
+    lf.create_score(
+        name="session-overall-quality",
+        value=avg_quality,
+        data_type="NUMERIC",
+        session_id=session_id,        # ← 不传 trace_id，挂整个 session
+    )</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>同时填 <code>trace_id + session_id</code> 会被服务端忽略其余字段（参见 <a href="#sec4-3">§4.3</a> 决策树）。挂 observation 必须<strong>同时</strong>给 <code>trace_id + observation_id</code>，单独给 <code>observation_id</code> 会 400 拒绝。
+    </div>
+
+    <h3>4.4 Session 级评分实战模式</h3>
+    <p>Session 级 score 最常见的场景是<strong>多轮对话结束后的总评</strong>——单独看每轮 trace 没意义，要看整段对话体验：</p>
+
+    <pre><code>@observe()
+def end_conversation(session_id: str, messages: list):
+    """用户在 web 端点关掉聊天窗口时调用。"""
+    lf = get_client()
+
+    # 整段对话的体感指标
+    avg_latency = compute_avg_latency(messages)
+    user_satisfaction = infer_satisfaction(messages)
+
+    # 关键：传 session_id 而非 trace_id
+    lf.create_score(
+        name="session-satisfaction",
+        value=user_satisfaction,
+        data_type="NUMERIC",
+        session_id=session_id,
+        comment=f"computed over {len(messages)} turns",
+    )</code></pre>
+
+    <p>UI 上 Sessions 标签页能聚合这些 score：按 session 看整体满意度，比单条 trace 看体验更准。</p>
+
+    <h3>4.5 挂到具体 generation：<code>observation.score_trace()</code></h3>
+    <p>有时候你不光想给整条 trace 打分，还想给<strong>特定那个 generation 节点</strong>打——比如 agent 多步决策里第二步第二部明显走偏。可以用 <code>observation.score_trace()</code> 把 score 挂到具体节点：</p>
+
+    <pre><code>@observe(as_type="generation", name="ask_critic")
+def ask_critic(question: str) -> str:
+    lf = get_client()
+
+    # 这一步 generation 的内部质量分
+    answer = call_llm(question)
+
+    lf.update_current_generation(
+        prompt=prompt_obj,
+        usage_details={"input": 50, "output": 30, "total": 80},
+    )
+
+    # 给这个 observation 打分（不是给父 trace）
+    lf.score_current_span(
+        name="generation-specific-helpfulness",
+        value=0.85,
+        data_type="NUMERIC",
+    )
+    return answer</code></pre>
+
+    <p>注意：在 <code>@observe(as_type="generation")</code> 内部，<code>score_current_span</code> 实际是给当前 generation（它也是一种 observation）打分，<strong>不是</strong>给父 trace。</p>
+
+    <h3>4.6 内联 Evaluator 函数模式</h3>
+
+    <p>前面 4.1-4.5 都是<strong>调用方主动</strong>给 trace 打分。但更工程化的做法是：把打分逻辑抽成一个<strong>evaluator 函数</strong>——业务代码只调一次 <code>evaluate(output)</code>，函数内部决定用什么方式打分。这就是后面 §5 / §6 要展开的 evaluator 模式。最小骨架：</p>
+
+    <pre><code>def rule_output_present(output: str) -&gt; tuple[float, str]:
+    """最简规则型 evaluator。返回 (value, comment)。"""
+    if not output or not output.strip():
+        return 0.0, "empty output"
+    return 1.0, "non-empty output"
+
+
+@observe()
+def handle(question: str) -> str:
+    lf = get_client()
+    answer = call_llm(question)
+
+    # 调 evaluator 函数
+    value, comment = rule_output_present(answer)
+
+    # 把结果写回 trace
+    lf.score_current_trace(
+        name="output-present",
+        value=value,
+        data_type="NUMERIC",
+        comment=comment,
+    )
+    return answer</code></pre>
+
+    <p>后面 §5 / §6 我们把这个模式升级：规则型用 Python 函数 + UI 注册，LLM Judge 用另一个 LLM 调用 + JSON 解析，<strong>但接口形态都和上面这个一致</strong>（返回 score 数据）。这就是 Langfuse evaluator 的设计哲学——<strong>实现方式多种，接口形态统一</strong>。</p>
+
+    <div class="task">
+      <strong>🎯 动手任务 §4（15 分钟）</strong>
+      <ol>
+        <li>打开 lesson 0004 跑出来的任一条 <code>movie-critic</code> trace → 在 Python REPL 里手动打一条 score：<code>lf.create_score(name="manual-test", value=1, data_type="BOOLEAN", trace_id="&lt;trace_id>")</code>（trace_id 从 UI URL 拿）</li>
+        <li>回 UI 看那条 trace 的 Scores tab，新加的 score 出现了吗？</li>
+        <li>（加分）写一个内联 evaluator 函数 <code>rule_min_length(min_chars=20)</code>：输出太短返回 (0，"") ，否则 (1，"")。把它接到 <code>react_agent.py</code> 的最后，给 trace 打分</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>5. 规则型 / Code Evaluator</h2>
+    <!-- ============================================================ -->
+
+    <h3>5.1 何时用 rule vs LLM judge</h3>
+
+    <p>Code Evaluator 适用的场景有非常清晰的边界——LLM Judge 适合 rule 答不了的"主观"判断。把决策做成表：</p>
+
+    <table>
+      <thead><tr><th>检查类型</th><th>典型例子</th><th>推荐方式</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>确定性 / 客观</strong></td>
+          <td>JSON 是否合法、长度限制、关键词包含、邮件格式、整数范围</td>
+          <td>✅ Code Evaluator</td>
+        </tr>
+        <tr>
+          <td><strong>exact match</strong></td>
+          <td>实验里 output == expected_output</td>
+          <td>✅ Code Evaluator</td>
+        </tr>
+        <tr>
+          <td><strong>工具调用检查</strong></td>
+          <td>调了正确的 tool、参数 schema 对得上</td>
+          <td>✅ Code Evaluator</td>
+        </tr>
+        <tr>
+          <td><strong>语义 / 主观</strong></td>
+          <td>helpful / tone / 是否礼貌 / 是否有歧义</td>
+          <td>❌ → LLM Judge</td>
+        </tr>
+        <tr>
+          <td><strong>事实正确性</strong></td>
+          <td>"法国的首都是巴黎" 是否真</td>
+          <td>❌ → LLM Judge（rule 查不了真值）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>5.2 严格代码约束（注册到 UI 时）</h3>
+
+    <div class="callout warn">
+      <strong>⚠️ 关键约束（如果走 UI 注册路径）：</strong>
+      <ul>
+        <li><strong>仅标准库</strong>——不能用 <code>numpy</code> / <code>requests</code> / 任何第三方包</li>
+        <li><strong>2 秒超时</strong>——超时的 evaluator 会被强制 kill，整条 score 丢失</li>
+        <li><strong>源码 &lt; 256 KB</strong></li>
+        <li>签名必须是 <code>def evaluate(ctx) -&gt; EvaluationResult</code>（<strong>不是 class</strong>）</li>
+        <li><code>ctx.experiment</code> 在 observation-only 评估时为 <code>None</code>——代码必须兼容</li>
+      </ul>
+      想用 <code>requests</code> 调外部 API？→ 走 LLM-as-a-Judge，让 LLM 替你调，或在业务代码里先调完把结果放 metadata。
+    </div>
+
+    <h3>5.3 签名 + 最小模板</h3>
+
+    <pre><code>from langfuse import EvaluationContext, EvaluationResult, Score
+
+def evaluate(ctx: EvaluationContext) -&gt; EvaluationResult:
+    """Code Evaluator 的唯一签名。
+    """
+    ctx    # EvaluationContext，包含当前 observation / experiment 上下文
+    output = ctx.observation.output  # 触发本次评估的 observation 输出
+
+    # 返回的每个 Score 都会作为一条 score 写回
+    return EvaluationResult(scores=[
+        Score(
+            name="output_present",          # 已在 UI Score Configs 注册过
+            value=output is not None,        # True / False
+            data_type="BOOLEAN",
+            comment="present" if output else "missing",
+        ),
+    ])</code></pre>
+
+    <h3>5.4 三个常见规则（完整可复用）</h3>
+
+    <h4>规则 1：output 是否存在（最简模板）</h4>
+    <pre><code>def rule_output_present(ctx):
+    """output 是否非 None 且非空字符串。"""
+    output = ctx.observation.output
+    present = bool(output and str(output).strip())
+    return EvaluationResult(scores=[Score(
+        name="output_present",
+        value=int(present),                 # BOOLEAN: 0 或 1
+        data_type="BOOLEAN",
+        comment="present" if present else "missing or empty",
+    )])</code></pre>
+
+    <h4>规则 2：exact match（实验场景对比 expected）</h4>
+    <pre><code>def rule_exact_match(ctx):
+    """observation output vs experiment item expected_output。
+    仅在 dataset experiment 里 evaluate(ctx) 会被传入 ctx.experiment；
+    observation-only 评估时 ctx.experiment 是 None，score 直接返回 None。
+    """
+    expected = ctx.experiment.item_expected_output if ctx.experiment else None
+    actual   = ctx.observation.output
+
+    if expected is None:
+        # observation-only 评估没有 expected，跳过
+        return EvaluationResult(scores=[])
+
+    return EvaluationResult(scores=[Score(
+        name="exact_match",
+        value=int(actual == expected),
+        data_type="BOOLEAN",
+        comment=f"expected={expected!r} actual={actual!r}",
+    )])</code></pre>
+
+    <h4>规则 3：长度 + 关键词检查（组合规则）</h4>
+    <pre><code>def rule_length_and_keyword(ctx, min_chars: int = 20, required_keyword: str = "答案"):
+    """检查 output 长度 & 是否含关键词，返回两个独立 score。"""
+    output = str(ctx.observation.output or "")
+
+    return EvaluationResult(scores=[
+        Score(
+            name="response_length",
+            value=float(len(output)),
+            data_type="NUMERIC",
+            comment=f"len={len(output)}",
+        ),
+        Score(
+            name="contains_required_keyword",
+            value=int(required_keyword in output),
+            data_type="BOOLEAN",
+            comment=f"required={required_keyword!r}",
+        ),
+    ])</code></pre>
+
+    <h3>5.5 UI 注册 vs inline 函数的取舍</h3>
+
+    <p>同一个 evaluator 函数可以<strong>两种方式</strong>使用：</p>
+
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s2-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- 起点 -->
+      <rect x="280" y="20" width="200" height="50" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="380" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">怎么用 Code Evaluator？</text>
+      <text x="380" y="60" text-anchor="middle" font-size="10" fill="#666" font-style="italic">决定 UI 注册 vs inline</text>
+
+      <!-- UI 注册 -->
+      <line x1="380" y1="70" x2="180" y2="130" stroke="#2d7a3d" stroke-width="1.5" fill="none" marker-end="url(#s2-arr2)"/>
+      <text x="248" y="98" font-size="11" fill="#2d7a3d" font-weight="700">生产</text>
+
+      <rect x="40" y="130" width="280" height="50" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="180" y="154" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">UI 注册</text>
+      <text x="180" y="170" text-anchor="middle" font-size="11" fill="#444">Evaluators → New → Code</text>
+
+      <text x="180" y="200" text-anchor="middle" font-size="10" fill="#666" font-style="italic">→ 在生产流量上跑</text>
+      <text x="180" y="214" text-anchor="middle" font-size="10" fill="#666">→ sampling rate 控制成本</text>
+      <text x="180" y="228" text-anchor="middle" font-size="10" fill="#666">→ 不需要改业务代码</text>
+      <text x="180" y="242" text-anchor="middle" font-size="10" fill="#666">→ 改 evaluator 不需发版</text>
+
+      <!-- inline -->
+      <line x1="380" y1="70" x2="580" y2="130" stroke="#c9a227" stroke-width="1.5" fill="none" marker-end="url(#s2-arr2)"/>
+      <text x="510" y="98" font-size="11" fill="#c9a227" font-weight="700">开发/调试</text>
+
+      <rect x="440" y="130" width="280" height="50" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="580" y="154" text-anchor="middle" font-size="13" font-weight="700" fill="#8a6a17">inline 函数</text>
+      <text x="580" y="170" text-anchor="middle" font-size="11" fill="#444">业务代码直接调</text>
+
+      <text x="580" y="200" text-anchor="middle" font-size="10" fill="#666" font-style="italic">→ 调试期 / 实验期</text>
+      <text x="580" y="214" text-anchor="middle" font-size="10" fill="#666">→ 快速迭代逻辑</text>
+      <text x="580" y="228" text-anchor="middle" font-size="10" fill="#666">→ 用第三方包也行</text>
+      <text x="580" y="242" text-anchor="middle" font-size="10" fill="#666">→ 改完需发版</text>
+
+      <!-- 组合 -->
+      <rect x="40" y="266" width="680" height="40" rx="6" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1"/>
+      <text x="380" y="286" text-anchor="middle" font-size="11" fill="#2d7a3d"><strong>推荐路径</strong>：开发期 inline 验证 → 稳定后注册到 UI → 配 sampling rate 上生产</text>
+    </svg>
+
+    <h3>5.6 <code>ctx</code> 字段（你能从 evaluator 里访问什么）</h3>
+
+    <table>
+      <thead><tr><th>字段</th><th>类型</th><th>何时有值</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>ctx.observation</code></td>
+          <td>Observation 对象</td>
+          <td>始终有</td>
+        </tr>
+        <tr>
+          <td><code>ctx.observation.output</code></td>
+          <td>any</td>
+          <td>始终有（可能 None）</td>
+        </tr>
+        <tr>
+          <td><code>ctx.observation.input</code></td>
+          <td>any</td>
+          <td>始终有（可能 None）</td>
+        </tr>
+        <tr>
+          <td><code>ctx.observation.metadata</code></td>
+          <td>dict</td>
+          <td>始终有</td>
+        </tr>
+        <tr>
+          <td><code>ctx.experiment</code></td>
+          <td>Experiment 对象 | None</td>
+          <td>只在 dataset experiment 触发时有</td>
+        </tr>
+        <tr>
+          <td><code>ctx.experiment.item_expected_output</code></td>
+          <td>any</td>
+          <td>同上 + dataset item 有 expected_output 字段</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>5.7 给 Code Evaluator 加单测</h3>
+    <p>Code Evaluator 是纯函数——<strong>必须</strong>写单测，不要等部署后才发现 bug。最小单测骨架：</p>
+
+    <pre><code>def test_rule_output_present():
+    # 用 namedtuple / dataclass 模拟 EvaluationContext
+    from collections import namedtuple
+    Obs = namedtuple("Obs", ["output"])
+    Ctx = namedtuple("Ctx", ["observation", "experiment"])
+
+    # 正常情况
+    result = rule_output_present(Ctx(observation=Obs(output="hello"), experiment=None))
+    assert result.scores[0].value == 1
+    assert result.scores[0].data_type == "BOOLEAN"
+
+    # 空字符串
+    result = rule_output_present(Ctx(observation=Obs(output=""), experiment=None))
+    assert result.scores[0].value == 0
+
+    # None
+    result = rule_output_present(Ctx(observation=Obs(output=None), experiment=None))
+    assert result.scores[0].value == 0
+    print("✓ rule_output_present 3/3 cases pass")</code></pre>
+
+    <p>把单测放在 <code>test_evaluators.py</code> 里，CI 跑一次再部署 evaluator 到 UI。</p>
+
+    <div class="task">
+      <strong>🎯 动手任务 §5（20 分钟）</strong>
+      <ol>
+        <li>写 <code>rule_length(min_chars=50)</code> 和 <code>rule_contains_keyword(keyword="Langfuse")</code> 两个 Code Evaluator，签名同 §5.3</li>
+        <li>给两个 evaluator 各写 3 个单测（覆盖 happy path / 边界 / 异常）</li>
+        <li>在 <code>react_agent.py</code> 里 inline 调用一次，把 score 挂到 trace 上</li>
+        <li>（加分）打开 Langfuse UI → Evaluators → New Evaluator → Code → 把你写的 evaluator 粘进去 → 用 sample observation 测试 → 保存</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>6. LLM-as-a-Judge</h2>
+    <!-- ============================================================ -->
+
+    <h3>6.1 何时用 LLM Judge</h3>
+
+    <p>Code Evaluator 答不了"这个回答对用户有没有帮助"、"语气是不是礼貌"、"事实是不是真"——这些需要<strong>语言理解</strong>。把决策做成表：</p>
+
+    <table>
+      <thead><tr><th>评估问题</th><th>推荐方式</th></tr></thead>
+      <tbody>
+        <tr><td>"回答有没有切中用户问题"</td><td>LLM Judge（语义匹配）</td></tr>
+        <tr><td>"语气是否友好 / 礼貌"</td><td>LLM Judge</td></tr>
+        <tr><td>"事实是否正确"</td><td>LLM Judge（除非有 ground truth 库）</td></tr>
+        <tr><td>"是否包含有害内容"</td><td>LLM Judge + Guardrail</td></tr>
+        <tr><td>"是否调用了正确的 tool"</td><td>Code Evaluator（确定性）</td></tr>
+        <tr><td>"JSON 格式合法"</td><td>Code Evaluator</td></tr>
+      </tbody>
+    </table>
+
+    <h3>6.2 Judge prompt 三段式</h3>
+
+    <p>一个好的 judge prompt 必须有 3 段，缺一不可：</p>
+
+    <pre><code>You are evaluating an AI assistant's response for helpfulness.
+
+        # 1. 评分维度 / 评分标准（rubric）
+        Score on a 1-5 scale:
+        - 5 = perfect, addresses the question completely and concisely
+        - 4 = good, addresses with minor issues
+        - 3 = acceptable, partially addresses
+        - 2 = poor, misses key points
+        - 1 = useless, off-topic or empty
+
+        # 2. 待评估的输入 / 输出（实际变量）
+        User question: {question}
+        Assistant answer: {output}
+
+        # 3. 输出格式约束（强制 JSON 便于解析）
+        Output ONLY a JSON object, no preamble:
+        {"score": &lt;int 1-5&gt;, "reason": "&lt;one sentence&gt;"}</code></pre>
+
+    <p><strong>逐段说明：</strong></p>
+    <ul>
+      <li><strong>第 1 段（rubric）</strong>：评分标准必须<strong>明确 + 可执行</strong>。避免"好 / 不好"这种主观词；用"包含 X"、"长度在 N-Y 之间"、"引用了 Z 数据源"这种可判断的描述</li>
+      <li><strong>第 2 段（变量）</strong>：<code>{question}</code> 和 <code>{output}</code> 是占位符——由代码用真实值填充</li>
+      <li><strong>第 3 段（输出格式）</strong>：<strong>必须强制 JSON</strong>，否则解析 fallback 会很频繁（§6.4 详讲）</li>
+    </ul>
+
+    <div class="callout">
+      <strong>经验法则：</strong>judge prompt 的 prompt 长度通常是用户 prompt 的 3-5 倍——你<strong>越想让 judge 评判得准，rubric 就越要写细</strong>。
+    </div>
+
+    <h3>6.3 完整 LLM Judge 函数（带 JSON parse fallback）</h3>
+
+    <svg viewBox="0 0 760 280" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s2-arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- Trace -->
+      <rect x="20" y="20" width="120" height="44" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.2"/>
+      <text x="80" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#0066cc">Trace</text>
+      <text x="80" y="56" text-anchor="middle" font-size="10" fill="#666">含 input/output</text>
+
+      <!-- 抽取 -->
+      <rect x="180" y="20" width="120" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.2"/>
+      <text x="240" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">抽取</text>
+      <text x="240" y="56" text-anchor="middle" font-size="10" fill="#666">question + output</text>
+
+      <!-- Judge LLM -->
+      <rect x="340" y="20" width="160" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.2"/>
+      <text x="420" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">Judge LLM</text>
+      <text x="420" y="56" text-anchor="middle" font-size="10" fill="#666">judge prompt + 变量</text>
+
+      <!-- JSON parse -->
+      <rect x="540" y="20" width="100" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.2"/>
+      <text x="590" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">解析</text>
+      <text x="590" y="56" text-anchor="middle" font-size="10" fill="#666">JSON.parse + fallback</text>
+
+      <!-- Score -->
+      <rect x="680" y="20" width="60" height="44" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.2"/>
+      <text x="710" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#2d7a3d">Score</text>
+      <text x="710" y="56" text-anchor="middle" font-size="10" fill="#2d7a3d">→ trace</text>
+
+      <path d="M140,42 L180,42" stroke="#666" stroke-width="1.2" marker-end="url(#s2-arr3)" fill="none"/>
+      <path d="M300,42 L340,42" stroke="#666" stroke-width="1.2" marker-end="url(#s2-arr3)" fill="none"/>
+      <path d="M500,42 L540,42" stroke="#666" stroke-width="1.2" marker-end="url(#s2-arr3)" fill="none"/>
+      <path d="M640,42 L680,42" stroke="#666" stroke-width="1.2" marker-end="url(#s2-arr3)" fill="none"/>
+
+      <!-- 第二行：parse fallback 路径 -->
+      <rect x="540" y="100" width="100" height="44" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1.2"/>
+      <text x="590" y="122" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">解析失败</text>
+      <text x="590" y="136" text-anchor="middle" font-size="10" fill="#666">fallback 0.5</text>
+
+      <path d="M590,64 L590,100" stroke="#c0392b" stroke-width="1" stroke-dasharray="3 3" fill="none" marker-end="url(#s2-arr3)"/>
+
+      <!-- 底部说明 -->
+      <rect x="20" y="170" width="720" height="92" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="36" y="192" font-size="12" font-weight="700" fill="#8a6a17">关键技巧</text>
+      <text x="36" y="212" font-size="11" fill="#222">• 抽 input/output 时只给 judge 看必要字段，<strong>不要让 judge 看 metadata / tags</strong>（§6.7 anti-pattern）</text>
+      <text x="36" y="230" font-size="11" fill="#222">• 解析失败时 <strong>fallback 到 0.5</strong>（中性分）+ 写详细 comment，不要 silent fail</text>
+      <text x="36" y="248" font-size="11" fill="#222">• judge 用低 temperature（0-0.3）+ 输出格式约束 + 三段 prompt 模板</text>
+    </svg>
+
+    <p>完整 LLM Judge 函数实现（含 fallback）：</p>
+
+    <pre><code>import json
+import re
+from langfuse import get_client
+
+JUDGE_PROMPT = """You are evaluating an AI assistant's response.
+Score on 1-5 scale for helpfulness.
+Output ONLY JSON: {"score": &lt;int&gt;, "reason": "&lt;one sentence&gt;"}
+
+Question: {question}
+Answer: {answer}
+"""
+
+def judge_helpfulness(question: str, answer: str, judge_llm) -&gt; tuple[float, str]:
+    """返回 (value, comment)。失败时 fallback 到 (0.5, parse_error)。"""
+    try:
+        resp = judge_llm.invoke(
+            JUDGE_PROMPT.format(question=question, answer=answer),
+            temperature=0,  # ← 关键：低 temperature 让 judge 稳定
+        )
+        # 解析 JSON（response_format 在支持的 provider 上更可靠）
+        parsed = json.loads(resp.text)
+
+        # 校验范围
+        score = float(parsed["score"])
+        if not (1.0 &lt;= score &lt;= 5.0):
+            return 0.5, f"out-of-range score={score}, fallback"
+
+        # normalize 到 0-1（Langfuse NUMERIC 习惯）
+        normalized = (score - 1) / 4
+        return normalized, parsed.get("reason", "")
+
+    except (json.JSONDecodeError, KeyError) as e:
+        # JSON 解析失败：从原文尝试 regex 抢救
+        m = re.search(r'"score"\s*:\s*(\d+)', resp.text)
+        if m:
+            score = float(m.group(1))
+            if 1.0 &lt;= score &lt;= 5.0:
+                return (score - 1) / 4, f"recovered from regex: {resp.text[:80]}"
+        return 0.5, f"parse_error: {e}; raw={resp.text[:100]}"
+
+
+@observe()
+def handle_with_judge(question: str) -&gt; str:
+    lf = get_client()
+    answer = call_llm(question)        # 业务 LLM（可以不同 model）
+
+    # 调 judge（独立 LLM 调用）
+    value, comment = judge_helpfulness(
+        question=question,
+        answer=answer,
+        judge_llm=judge_llm_client,    # 可以用 gpt-4o / Claude / 你的 MiniMax
+    )
+
+    lf.score_current_trace(
+        name="helpfulness",
+        value=value,
+        data_type="NUMERIC",
+        comment=comment,
+    )
+    return answer</code></pre>
+
+    <h3>6.4 输出格式约束的 3 个 trick</h3>
+
+    <p>LLM 输出不稳定——30% 情况下你不严格约束就会拿到非 JSON。三个稳定 trick：</p>
+
+    <table>
+      <thead><tr><th>trick</th><th>作用</th><th>缺点</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>低 temperature（0-0.3）</strong></td>
+          <td>输出分布更窄，更稳定</td>
+          <td>失去一些"创造力"——但 judge 本来就不该创造</td>
+        </tr>
+        <tr>
+          <td><strong>prompt 强约束</strong>（"Output ONLY a JSON object, no preamble"）</td>
+          <td>90% 情况下拿到干净 JSON</td>
+          <td>少数模型还是会偷偷加 prose</td>
+        </tr>
+        <tr>
+          <td><strong>OpenAI 的 <code>response_format={"type": "json_object"}</code></strong></td>
+          <td>服务端强制 JSON 输出，最可靠</td>
+          <td>仅 OpenAI / 部分 provider 支持</td>
+        </tr>
+      </tbody>
+>
+    </table>
+
+    <p>三个<strong>同时用</strong>最稳：低 temperature + 强 prompt + response_format（如果支持）。</p>
+
+    <h3>6.5 Judge prompt 用 Evaluator 自带版本管理（不是 Prompt Management）</h3>
+
+    <div class="callout warn">
+      <strong>⚠️ 常见误区：</strong>"我把 judge prompt 也放到 Prompt Management 里管理"——<strong>不行</strong>。Judge prompt 不是给业务用的，是给 evaluator 用的，归 Evaluator 资源自己带版本（"Updating its definition creates a new version, and active rules automatically use the latest version"）。
+      <br><br>
+      业务 prompt（movie-critic / chat-system 等）→ Prompt Management（lesson 0004）
+      <br>
+      Judge prompt → <strong>Evaluator 资源</strong>（LLM-as-a-Judge evaluator 的 definition 字段）
+    </div>
+
+    <h3>6.6 挂到 production trace（observation-level + isRootObservation）</h3>
+
+    <p>把 LLM Judge evaluator 部署到 UI 后，配置 Rule 用经典 filter：</p>
+
+    <pre><code>{
+  "type": "boolean",
+  "column": "isRootObservation",
+  "operator": "=",
+  "value": true
+}</code></pre>
+
+    <p><strong>为什么用 isRootObservation？</strong></p>
+    <ul>
+      <li>每条 trace 只评一次（root 那次 LLM 调用），不重复评子 observation</li>
+      <li>精准 target root 的 output——root 通常是用户问题的直接 LLM 回答</li>
+      <li>成本可控：production 上 10% sampling × root-only = = 流量 1/10</li>
+    </ul>
+
+    <h3>6.7 Judge 的 anti-patterns（4 条 ⚠️）</h3>
+
+    <div class="callout warn">
+      <strong>Anti-pattern 1：让 judge 看自己的输出</strong><br>
+      如果用同一模型、同一 prompt 让 judge 评自己的输出，会循环自我确认。<strong>修复</strong>：judge 用<strong>不同模型</strong>（业务 GPT-4o， judge 用 Claude / Gemini / 别的）。
+    </div>
+
+    <div class="callout warn">
+      <strong>Anti-pattern 2：judge prompt 用高 temperature</strong><br>
+      Temperature &gt; 0.5 → judge 输出随机性大，<strong>同一份输入两次跑分能差 1 分</strong>，整个 score 不可信。<br>
+      <strong>修复</strong>：judge 用 0-0.3。
+    </div>
+
+    <div class="callout warn">
+      <strong>Anti-pattern 3：让 judge 看 metadata / tags</strong><br>
+      如果 metadata 含 <code>expected_score=0.9</code> 之类的元信息，judge 会被污染。<br>
+      <strong>修复</strong>：构造 judge prompt 时<strong>只传 input/output</strong>，不要传 metadata。
+    </div>
+
+    <div class="callout warn">
+      <strong>Anti-pattern 4：judge prompt 又短又模糊</strong><br>
+      "Score the answer from 1 to 5" → judge 不知道怎么评 → 输出不稳定。<br>
+      <strong>修复</strong>：必须按 §6.2 三段式，每段 3-5 行。
+    </div>
+
+    <h3>6.8 v4 trace-level deprecation 警告</h3>
+
+    <div class="callout warn">
+      <strong>⚠️ v4 已弃用 trace-level evaluator</strong>（2026-11-16 强制切）。<br>
+      历史代码如果挂在 trace 上：迁移期内还能跑但有 warning；新项目一律 observation-level。<br>
+      Rule filter 用 <code>isRootObservation=true</code>（§6.6）是 v3+ 推荐标准。
+    </div>
+
+    <div class="task">
+      <strong>🎯 动手任务 §6（30 分钟）</strong>
+      <ol>
+        <li>复用 lesson 0004 的 <code>movie-critic</code> prompt + LLM 拿一份输出</li>
+        <li>写 <code>judge_helpfulness(question, output)</code> 函数（按 §6.3 模板），用 <strong>不同 model</strong>（业务 MiniMax-M3， judge 用 gpt-4o-mini 或 Claude）</li>
+        <li>跑 5 次同一份输入，看 judge 输出波动——如果 &gt; 1 分波动，temperature 调到 0</li>
+        <li>故意构造 judge 输出是 prose 不是 JSON 的 prompt，看 fallback regex 能不能抢救</li>
+        <li>（加分）打开 Langfuse UI → Evaluators → New → LLM-as-a-Judge → 把你写的 judge prompt 粘进去 → 用 §6.6 的 filter 创建 Rule → 用 sample trace 试跑</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>7. 一句话总结</h2>
+    <!-- ========================================================= === -->
+
+    <p><strong>Code Evaluator 用 stdlib 函数做确定性检查，LLM Judge 用另一个 LLM 做语义判断，两种实现统一返回 <code>EvaluationResult(scores=[...])</code>。生产部署走 UI 注册 + Rule filter（<code>isRootObservation=true</code>）。</strong></p>
+
+    <p>下一节（Part 3）讲三件事：①Annotation Queue vs User Feedback 的两条人工路径 ②Score 在 UI 上的呈现 + Analytics ③常见坑汇总。</p>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0005-03-scoring-workflows.html">Lesson 0005 · Part 3 · Annotation Queue / 用户反馈 / UI 与 Analytics →</a><br>
+      本节参考：<a href="https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge">LLM-as-a-Judge</a> · <a href="https://langfuse.com/docs/evaluation/evaluation-methods/code-evaluators">Code Evaluators</a> · <a href="https://langfuse.com/docs/evaluation/evaluation-methods/scores-via-sdk">Scores via SDK</a><br>
+      相关：<a href="0005-01-scoring-fundamentals.html">Part 1 · 数据模型 + Evaluator 一等公民</a> · <a href="../reference/glossary.html">术语表 · Evaluator</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

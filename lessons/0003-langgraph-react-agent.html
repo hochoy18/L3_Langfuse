@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0003 · 接入 LangGraph ReAct Agent，看多步 trace</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="0003-langgraph-react-agent.html" class="active">0003 · ReAct Agent</a></li>
+      <li><a href="0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li><a href="0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html">0005 · 评分(3/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../reference/prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="../reference/prompt-code-integration.html">代码接入</a></li>
+      <li><a href="../reference/prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="../reference/prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0003 · AGENT TRACE</div>
+      <h1>把 LangGraph ReAct Agent 接入 Langfuse</h1>
+      <div class="meta">预计 30 分钟 · 难度 ★★★☆☆ · 产出：UI 里看到一棵完整的多步 trace 树（agent → tool → llm → tool → llm）</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节目标</strong><br>
+      用 LangGraph 的 <code>create_react_agent</code> 搭一个最小 ReAct，<strong>一行 CallbackHandler</strong> 接进 Langfuse，UI 里能看到每次 LLM 调用 + 每次 Tool 调用作为子节点挂在同一棵 trace 树下。
+    </div>
+
+    <h2>1. 为什么 Agent 必须有 trace</h2>
+    <p>单次 OpenAI 调用的 hello trace 你已经看到了——一张扁平的 trace + 一个 Generation。但 Agent 不一样：</p>
+
+    <table>
+      <thead><tr><th>场景</th><th>没有 trace 时</th><th>有 trace 时</th></tr></thead>
+      <tbody>
+        <tr><td>"这个回答为什么错了"</td><td>翻日志，猜是哪一步出问题</td><td>UI 直接看到是哪次 LLM 调用走的岔路</td></tr>
+        <tr><td>"为什么 token 这么多"</td><td>统计 chat history 总长度</td><td>每一步 Generation 都列了 prompt / completion / tokens</td></tr>
+        <tr><td>"Agent 死循环了"</td><td>进程卡死，看不到栈</td><td>trace 树一眼看到 20 层一样的 span 嵌套</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. 最小 ReAct：两个工具</h2>
+    <p>完整可运行代码在 <a href="../src/apps/fuse/react_agent.py"><code>src/apps/fuse/react_agent.py</code></a>。先看核心：</p>
+
+    <pre><code>from datetime import datetime
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langgraph.prebuilt import create_react_agent
+
+@tool
+def add(a: int, b: int) -> int:
+    """返回 a + b。"""
+    return a + b
+
+@tool
+def now() -> str:
+    """返回当前时间（ISO 格式）。"""
+    return datetime.now().isoformat(timespec="seconds")
+
+llm = ChatOpenAI(model="MiniMax-M3", temperature=0)
+agent = create_react_agent(llm, [add, now])</code></pre>
+
+    <p>三件事：</p>
+    <table>
+      <thead><tr><th>组件</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td><code>@tool</code></td><td>把 Python 函数包装成 LangChain 工具（自动从 docstring 抽 schema）</td></tr>
+        <tr><td><code>ChatOpenAI</code></td><td>一个 Runnable，调一次就是一次 LLM 调用</td></tr>
+        <tr><td><code>create_react_agent</code></td><td>LangGraph 的预制 ReAct：内部帮你拼好 <code>agent → tool → agent → …</code> 这条边</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>说明：</strong><code>create_react_agent</code> 背后是个 <code>StateGraph</code>，节点只有两个——<code>agent</code>（调 LLM 决定下一步）和 <code>tools</code>（执行工具调用）。每次循环把工具结果写回 messages，再调一次 LLM，直到 LLM 决定不再调工具。
+    </div>
+
+    <h2>3. 一行接入 Langfuse</h2>
+    <p>核心就这一步——构造一个 CallbackHandler，传进 LangChain 的 <code>config</code>：</p>
+
+    <pre><code>from langfuse.langchain import CallbackHandler
+
+handler = CallbackHandler()  # 默认读 .env 里的 LANGFUSE_* 配置
+
+result = agent.invoke(
+    {"messages": [{"role": "user", "content": "现在几点了？把秒数加 100。"}]},
+    config={
+        "callbacks": [handler],
+        "metadata": {
+            "langfuse_session_id": "demo-001",
+            "langfuse_user_id": "demo-user",
+            "langfuse_tags": ["lesson-0003", "react"],
+            "langfuse_trace_name": "react-agent-demo",
+        },
+    },
+)</code></pre>
+
+    <h3>Langfuse 约定的 metadata key（langchain 专用）</h3>
+    <p>不是所有 metadata 都会被 Langfuse 识别。只有这几个 key 会触发特殊处理：</p>
+
+    <table>
+      <thead><tr><th>Key</th><th>作用</th><th>值类型</th></tr></thead>
+      <tbody>
+        <tr><td><code>langfuse_session_id</code></td><td>把这条 trace 归到某个 session（多轮对话）</td><td>str</td></tr>
+        <tr><td><code>langfuse_user_id</code></td><td>归到某个 user，做用户级聚合</td><td>str</td></tr>
+        <tr><td><code>langfuse_tags</code></td><td>给 trace 打标签，方便过滤</td><td>list[str]</td></tr>
+        <tr><td><code>langfuse_trace_name</code></td><td>自定义 trace 名字（默认会用 chain / agent 的 class 名）</td><td>str</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>key 是 <strong>带 <code>langfuse_</code> 前缀</strong>的，不是直接 <code>session_id</code>。LangChain 自己也有 <code>session_id</code> 这个 metadata key（LangSmith 兼容），两者名字冲突，Langfuse 必须用前缀区分。
+    </div>
+
+    <p>剩下随便写什么 metadata 都会原样存到 trace / observation 上，作为附加字段。</p>
+
+    <h2>4. 跑 + 看 UI 里的 trace 树</h2>
+
+    <pre><code>uv run python src/apps/fuse/react_agent.py</code></pre>
+
+    <p>控制台会打印最终答案和 <code>trace id = ...</code>。浏览器切到 <code>localhost:3000</code>，左侧 Tracing 找到 <code>react-agent-demo</code>，你会看到一棵这样的树：</p>
+
+    <pre><code>Trace: react-agent-demo             ← session_id=demo-001, user_id=demo-user
+└─ Agent: LangGraph                 ← 整张图是一个 Agent observation
+   ├─ Generation #1: MiniMax-M3     ← 第 1 次 LLM 调用，决定调哪个工具
+   │   ├─ input:    "现在几点了？…"
+   │   ├─ output:   tool_calls=[{name: now}]
+   │   └─ tokens:   35 in / 18 out
+   ├─ Tool: now                     ← 第 1 个工具执行
+   │   └─ output:   "2026-09-16T13:42:07"
+   ├─ Generation #2: MiniMax-M3     ← 第 2 次 LLM 调用，决定再调 add
+   │   ├─ input:    [..., tool_result]
+   │   ├─ output:   tool_calls=[{name: add, args: {a: 7, b: 100}}]
+   │   └─ tokens:   78 in / 22 out
+   ├─ Tool: add
+   │   └─ output:   107
+   └─ Generation #3: MiniMax-M3     ← 第 3 次 LLM 调用，给最终答案
+       ├─ input:    [..., tool_result]
+       ├─ output:   "把秒数加 100 后是 107"
+       └─ tokens:   95 in / 24 out</code></pre>
+
+    <h3>节点类型映射</h3>
+    <table>
+      <thead><tr><th>LangChain 事件</th><th>Langfuse Observation 类型</th><th>图标</th></tr></thead>
+      <tbody>
+        <tr><td><code>on_chain_start</code> (create_react_agent)</td><td>Agent</td><td>🤖</td></tr>
+        <tr><td><code>on_llm_start</code> / <code>on_llm_end</code></td><td>Generation</td><td>✨</td></tr>
+        <tr><td><code>on_tool_start</code> / <code>on_tool_end</code></td><td>Tool</td><td>🔧</td></tr>
+        <tr><td><code>on_retriever_start</code></td><td>Retriever</td><td>📚</td></tr>
+      </tbody>
+    </table>
+
+    <h2>5. @observe 装饰器 vs CallbackHandler</h2>
+    <p>两种接入方式各有用途，<strong>不要混用包同一段代码</strong>：</p>
+
+    <table>
+      <thead><tr><th>方式</th><th>适合场景</th><th>粒度</th></tr></thead>
+      <tbody>
+        <tr><td><code>@observe()</code></td><td>包自己写的工具函数、预处理/后处理逻辑</td><td>整段函数一个 span</td></tr>
+        <tr><td><code>CallbackHandler()</code></td><td>LangChain / LangGraph 自动埋点</td><td>每个 chain / llm / tool 都建节点</td></tr>
+      </tbody>
+    </table>
+
+    <p>实际项目里通常是<strong>外层用 <code>@observe</code> 包业务函数，里面跑 LangGraph</strong>。两层会自动嵌套：</p>
+
+    <pre><code>@observe(name="user_request")
+def handle(question: str) -> str:
+    handler = CallbackHandler()
+    return agent.invoke(
+        {"messages": [{"role": "user", "content": question}]},
+        config={"callbacks": [handler]},   # ← 复用外层 trace，不会另开
+    )</code></pre>
+
+    <p>关键点：<code>CallbackHandler()</code> 默认会把所有 event 挂到<strong>当前激活的 Langfuse context</strong>下——也就是外层 <code>@observe</code> 创建的 trace。无需手动传 trace_id。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>别在已经跑了 <code>@observe</code> 的代码里再 <code>from langfuse.openai import openai</code> 来手动构造 OpenAI client 调 LLM——会出现"trace 嵌套两层 trace"的诡异现象，因为 langfuse.openai 不知道外层有 observe，会自己新开一个 Trace。lesson 0002 的 hello_trace 模式只适合裸调用 OpenAI，Agent 场景请走 LangChain。
+    </div>
+
+    <h2>6. 进阶：手工 StateGraph 的细微差别</h2>
+    <p><code>create_react_agent</code> 是预制件，省事但看不到节点名字。如果你要更精细的控制（自定义节点、并行分支、子图），用 <code>StateGraph</code> 手写：</p>
+
+    <pre><code>from langgraph.graph import StateGraph, START, END
+from typing import TypedDict, Annotated
+from langgraph.graph.message import add_messages
+
+class S(TypedDict):
+    messages: Annotated[list, add_messages]
+
+g = StateGraph(S)
+g.add_node("planner", planner_fn)   # 自定义节点
+g.add_node("tools", tool_node)
+g.add_edge(START, "planner")
+g.add_conditional_edges("planner", should_call_tools)
+g.add_edge("tools", "planner")
+app = g.compile()</code></pre>
+
+    <p>CallbackHandler 同样工作。每个 <code>add_node(name, fn)</code> 中的 <code>name</code> 会作为 observation 的名字出现在 UI 上——<strong>取名要清晰，这是你看 trace 的主要索引</strong>。</p>
+
+    <h2>7. 常见报错 & 排查</h2>
+    <table>
+      <thead><tr><th>症状</th><th>原因</th><th>排查</th></tr></thead>
+      <tbody>
+        <tr><td>UI 看不到 trace</td><td>CallbackHandler 没生效 / Langfuse 没收到</td><td>检查 <code>handler.last_trace_id</code> 是否非空</td></tr>
+        <tr><td>trace 出现但没有子节点</td><td>callback 装在了错的 chain 上</td><td>确认 <code>config</code> 传给了 <code>agent.invoke</code>，不是 <code>llm.invoke</code></td></tr>
+        <tr><td>Tool 节点显示 raw 字符串而不是 JSON</td><td>Tool 的 schema 描述太弱</td><td>给 <code>@tool</code> 函数的 docstring 第一行写清楚参数</td></tr>
+        <tr><td>LLM 决定不调工具但 answer 为空</td><td>模型不熟悉 tool call 协议</td><td>换模型 / 检查 <code>create_react_agent</code> 用的 prompt 是否被覆盖</td></tr>
+      </tbody>
+    </table>
+
+    <div class="task">
+      <strong>🎯 动手任务（20 分钟）</strong>
+      <ol>
+        <li>把 <code>src/apps/fuse/react_agent.py</code> 跑通。打开 UI，点开那条 trace，数一下有几层节点、几次 LLM 调用</li>
+        <li>加第三个工具 <code>multiply(a, b)</code>，构造一个需要连续两次乘法的题目（比如 "(7*8)*9"），跑一次，看 trace 是不是 5 层（agent → llm → tool → llm → tool → llm）</li>
+        <li>故意把 <code>@tool</code> 的 docstring 写得很模糊（比如只写 "do math"），观察模型是否还能正确选择工具</li>
+        <li>在 UI 上用 session_id 过滤，只看 <code>demo-001</code> 这一条；然后改 <code>langfuse_session_id</code> 再跑一次，确认不同 session_id 不会混在一起</li>
+      </ol>
+    </div>
+
+    <h2>8. 一句话总结</h2>
+    <p><strong>LangGraph agent 不需要写任何埋点代码——构造一个 <code>CallbackHandler()</code> 塞到 <code>config["callbacks"]</code> 里，整棵调用树就自动出来了。</strong></p>
+    <p>下一节我们把 prompt 也搬出代码，用 Langfuse 的 Prompt Management 做版本化。</p>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0004-prompt-management.html">Lesson 0004 · Prompt 提到 Langfuse 做版本管理 →</a><br>
+      引用资源：<a href="../RESOURCES.md">RESOURCES.md · LangGraph Integration</a> · <a href="../reference/glossary.html">Glossary · Trace / Generation / Tool</a><br>
+      踩坑回顾：<a href="../learning-records/0006-hello-trace-custom-openai-client.md">learning-record 0006 · hello_trace 的两件事</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

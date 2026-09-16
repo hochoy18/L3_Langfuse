@@ -1,0 +1,626 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0005 · Part 1 · 从观测到评分</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="0004-prompt-management.html">0004 · Prompt</a></li>
+      <li><a href="0005-01-scoring-fundamentals.html" class="active">0005 · 评分(1/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0005 · EVALUATION · PART 1 of 3</div>
+      <h1>从观测到评分：概念、数据模型与 Evaluator 一等公民</h1>
+      <div class="meta">预计 35 分钟 · 难度 ★★★☆☆ · 涵盖 §1-3；Part 2 讲 Evaluator 三种实现，Part 3 讲 Annotation Queue 与用户反馈</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节 3 个目标</strong>
+      <ol>
+        <li>区分 <strong>observability</strong>（看发生了什么）和 <strong>evaluation</strong>（看好不好）</li>
+        <li>掌握 Score 的 4 种 data_type 和 4 个附加层</li>
+        <li>理解 Langfuse v3+ 的 Evaluator + Rule 生产级模式，避开 v4 trace-level 弃用坑</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>1. 为什么需要评分</h2>
+    <!-- ============================================================ -->
+
+    <h3>1.1 Observability ≠ Evaluation</h3>
+    <p>Lesson 0002-0004 解决了"线上发生了什么"——每一次 LLM 调用的输入、输出、token、延迟、调用树，全部进了 Langfuse。但这些只是<strong>观测</strong>，回答不了另一个问题：</p>
+
+    <blockquote>
+      <em>"上周发版后，回答到底有没有变差？"</em><br>
+      <em>"GPT-4o 和 Gemini Pro 哪个更贴合我们的语气？"</em><br>
+      <em>"用户点 👍 的回答，是不是真的比点 👎 的好？"</em>
+    </blockquote>
+
+    <p>这些都是 <strong>evaluation</strong> 的范畴。两个概念的关系：</p>
+
+    <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- 左侧 Observability -->
+      <rect x="20" y="30" width="280" height="170" rx="8" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="160" y="58" text-anchor="middle" font-size="17" font-weight="700" fill="#0066cc">Observability 观测</text>
+      <text x="160" y="82" text-anchor="middle" font-size="13" fill="#444" font-style="italic">"what happened"</text>
+      <line x1="50" y1="100" x2="270" y2="100" stroke="#0066cc" stroke-width="0.5"/>
+      <text x="50" y="122" font-size="13" fill="#222">• Trace / Span / Generation</text>
+      <text x="50" y="144" font-size="13" fill="#222">• input / output / tokens</text>
+      <text x="50" y="166" font-size="13" fill="#222">• latency / 错误率</text>
+      <text x="50" y="188" font-size="13" fill="#666" font-style="italic">回答"线上在跑什么"</text>
+
+      <!-- 右侧 Evaluation -->
+      <rect x="460" y="30" width="280" height="170" rx="8" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="600" y="58" text-anchor="middle" font-size="17" font-weight="700" fill="#8a6a17">Evaluation 评估</text>
+      <text x="600" y="82" text-anchor="middle" font-size="13" fill="#444" font-style="italic">"how good was it"</text>
+      <line x1="490" y1="100" x2="710" y2="100" stroke="#c9a227" stroke-width="0.5"/>
+      <text x="490" y="122" font-size="13" fill="#222">• Score（数值 / 分类）</text>
+      <text x="490" y="144" font-size="13" fill="#222">• comment（打分理由）</text>
+      <text x="490" y="166" font-size="13" fill="#222">• quality / tone / safety</text>
+      <text x="490" y="188" font-size="13" fill="#666" font-style="italic">回答"线上跑得好不好"</text>
+
+      <!-- 中间连接 -->
+      <text x="380" y="118" text-anchor="middle" font-size="12" fill="#666">观测是评估的</text>
+      <text x="380" y="138" text-anchor="middle" font-size="12" fill="#666">输入对象</text>
+      <path d="M300,115 L460,115" stroke="#666" stroke-width="1.5" marker-end="url(#arr)" fill="none"/>
+    </svg>
+
+    <p><strong>关键关系</strong>：评估的对象<strong>不是凭空打分</strong>——它必须依附在某个 trace / observation 上。没有观测数据，评估无从谈起。</p>
+
+    <h3>1.2 三个典型场景</h3>
+    <table>
+      <thead><tr><th>场景</th><th>没评估时怎么搞</th><th>有评估时怎么搞</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>发版后回归检测</strong></td>
+          <td>用户反馈"变差了"才反应过来，已经过了几小时</td>
+          <td>每条 trace 自动打分，UI 看 score 趋势图，发版后 5 分钟内看到拐点</td>
+        </tr>
+        <tr>
+          <td><strong>Prompt A/B 决策</strong></td>
+          <td>PM 拍脑袋决定、或者看 token 数量判断</td>
+          <td>两个 prompt 各跑 1000 条 trace，比 score 均值 + 标准差</td>
+        </tr>
+        <tr>
+          <td><strong>用户反馈闭环</strong></td>
+          <td>👍👎 数据躺在数据库里，没人能关联到具体的 prompt 版本</td>
+          <td>每次 👍 直接变成一条 score 挂在 trace 上，能点回 prompt v3 看到底是哪版出错</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>直觉：</strong>trace 是电影的"拍摄素材"（每一个镜头都在），score 是"评分"（这一镜到底演得好不好）。两者放在一起才有完整的 QA 闭环。
+    </div>
+
+    <h3>1.3 三个常见误解 FAQ</h3>
+    <p>在动手写 score 之前，先澄清 3 个最常见的误解——它们是新人踩坑的高发区，每个都能让你浪费半天排查：</p>
+
+    <div class="callout warn">
+      <strong>误解 1：接 Langfuse 会拖慢我的 LLM 调用？</strong><br>
+      <strong>真相：不会。</strong>SDK 内部是<strong>异步队列 + 批量 flush</strong>——app 调完 LLM 立即返回用户响应，trace 在后台批量上报。实测 latency 影响在<strong>毫秒级以内</strong>，可忽略。详见 §1.4 时序图。
+    </div>
+
+    <div class="callout warn">
+      <strong>误解 2：trace 名字想怎么塞就怎么塞？</strong><br>
+      <strong>真相：不行。</strong> 名字是 <strong>API</strong>——换名 = 所有 evaluator / dashboard / saved view 的引用<strong>静默失效</strong>，且不会报错。<br>
+      <strong>规则</strong>：动词开头（<code>classify-intent</code> / <code>ask-llm</code> / <code>retrieve-context</code>）、稳定 + 低基数 + 不含动态值（<code>order-8945</code> ❌）+ 不含模型名（<code>gpt-4o-ask</code> ❌——模型名应放 <code>generation.model</code> 字段）。
+    </div>
+
+    <div class="callout warn">
+      <strong>误解 3：把整个 agent 循环塞一个 trace 完事？</strong><br>
+      <strong>真相：别。</strong> 一个 trace 内应让每个 LLM 调用成为独立 <code>generation</code>，每个 tool 调用成为独立 <code>tool</code>，彼此按调用顺序嵌套。
+      否则你看不清中间哪一步出了问题——token 滥用 / 工具失败 / 决策漂移都查不出来。
+      LangGraph / LangChain CallbackHandler 默认就生成这种结构，<strong>不要自己包成单一 observation</strong>。
+    </div>
+
+    <h3>1.4 底层协议与运行机制</h3>
+    <p>Langfuse v3+ 底层基于 <strong>OpenTelemetry</strong> 开源标准——这意味着你的 trace 不仅能进 Langfuse，还能同时发给 Datadog / Jaeger 等多个后端（多 OTEL exporter 不会冲突）。</p>
+
+    <p>下面这张时序图展示了一次 LLM 调用产生 trace、再上报到 Langfuse 的全过程：</p>
+
+    <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="seqArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+        <marker id="seqArrOk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#2d7a3d"/>
+        </marker>
+      </defs>
+
+      <!-- Lifelines header -->
+      <rect x="60"  y="20" width="100" height="32" rx="4" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1.2"/>
+      <text x="110" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">App</text>
+
+      <rect x="200" y="20" width="100" height="32" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.2"/>
+      <text x="250" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">SDK</text>
+
+      <rect x="340" y="20" width="100" height="32" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1.2"/>
+      <text x="390" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#8a6a17">Queue</text>
+
+      <rect x="480" y="20" width="100" height="32" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.2"/>
+      <text x="530" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">Exporter</text>
+
+      <rect x="620" y="20" width="120" height="32" rx="4" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.2"/>
+      <text x="680" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">Langfuse 后端</text>
+
+      <!-- Lifelines vertical -->
+      <line x1="110" y1="52" x2="110" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="250" y1="52" x2="250" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="390" y1="52" x2="390" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="530" y1="52" x2="530" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="680" y1="52" x2="680" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+
+      <!-- Loop 1: incoming requests -->
+      <rect x="20" y="64" width="720" height="80" fill="none" stroke="#999" stroke-width="0.5" stroke-dasharray="4 3" rx="4"/>
+      <text x="28" y="78" font-size="10" fill="#666" font-style="italic">loop: incoming requests (毫秒级)</text>
+
+      <!-- App → SDK createTrace -->
+      <text x="135" y="100" font-size="10" fill="#444">call LLM + trace</text>
+      <path d="M110,100 L240,100" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
+
+      <!-- SDK → Queue enqueue -->
+      <text x="285" y="100" font-size="10" fill="#444">createTrace()</text>
+      <path d="M250,100 L380,100" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
+
+      <!-- App returns to user (no waiting for flush) -->
+      <text x="115" y="125" font-size="10" fill="#2d7a3d">返回用户响应</text>
+      <path d="M100,125 L40,125" stroke="#2d7a3d" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#seqArrOk)" fill="none"/>
+      <text x="38" y="129" text-anchor="end" font-size="10" fill="#666">user</text>
+
+      <!-- App 继续处理 -->
+      <text x="115" y="142" font-size="10" fill="#666" font-style="italic">app 继续处理其他请求</text>
+
+      <!-- Loop 2: background flush -->
+      <rect x="20" y="158" width="720" height="60" fill="none" stroke="#999" stroke-width="0.5" stroke-dasharray="4 3" rx="4"/>
+      <text x="28" y="172" font-size="10" fill="#666" font-style="italic">loop: background timer / batch size（秒级，独立线程）</text>
+
+      <text x="555" y="195" font-size="10" fill="#444">send batch</text>
+      <path d="M530,195 L670,195" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
+      <text x="555" y="210" font-size="10" fill="#444">ack</text>
+      <path d="M670,210 L540,210" stroke="#666" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#seqArr)" fill="none"/>
+
+      <!-- 短脚本场景：flush 强制时机 -->
+      <rect x="20" y="234" width="720" height="62" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1"/>
+      <text x="32" y="254" font-size="12" font-weight="700" fill="#c0392b">⚠️ 短生命周期应用（脚本 / batch / cron job）</text>
+      <text x="32" y="272" font-size="11" fill="#222">进程退出前<tspan font-family="ui-monospace,monospace" fill="#c0392b" font-weight="700"> 必须 </tspan>显式 <tspan font-family="ui-monospace,monospace" fill="#c0392b">get_client().flush()</tspan>，否则队列里的 trace 丢失。</text>
+      <text x="32" y="288" font-size="10" fill="#666" font-style="italic">Lesson 0002 已演示过 hello_trace.py 末尾的 flush() 调用。</text>
+
+      <!-- 长跑应用 -->
+      <rect x="20" y="306" width="720" height="50" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1"/>
+      <text x="32" y="326" font-size="12" font-weight="700" fill="#2d7a3d">✅ 长跑应用（web server / API / 常驻 worker）</text>
+      <text x="32" y="344" font-size="11" fill="#222">exporter 持续运行，不需要 flush；进程终止时优雅处理即可。</text>
+    </svg>
+
+    <p><strong>关键点</strong>（这张图背后的 4 条机制）：</p>
+    <ul>
+      <li><strong>非阻塞</strong>——app 调完 LLM 立即返回，trace 在后台批量上报（实测 latency 影响 &lt; 1ms）</li>
+      <li><strong>短脚本必加 <code>flush()</code></strong>——一次性脚本在退出前必须显式调用，否则队列里未发送的 trace 丢失（Lesson 0002 hello_trace.py 已演示）</li>
+      <li><strong>长跑应用不需 flush</strong>——exporter 在独立线程持续运行，进程优雅退出时由 OTel SDK 处理</li>
+      <li><strong>v4 默认 events_only</strong>——意味着传统 <code>/api/public/traces</code> REST 端点会 404；查数据请用 v2/observations API 或 <code>npx @langfuse/cli</code></li>
+    </ul>
+
+    <!-- ============================================================ -->
+    <h2>2. Score 数据模型</h2>
+    <!-- ============================================================ -->
+
+    <h3>2.1 4 种 data_type</h3>
+    <p>Score 的 value 字段有 4 种合法类型，<strong>必须显式声明</strong>（否则 Langfuse 会按 value 推断，但推断结果不可控）：</p>
+
+    <table>
+      <thead><tr><th>data_type</th><th>value 取值</th><th>典型场景</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><code>NUMERIC</code></td>
+          <td>float（建议 0-1 或 1-5）</td>
+          <td>helpfulness 0.92、tone 0.7、latency penalty -0.3</td>
+        </tr>
+        <tr>
+          <td><code>CATEGORICAL</code></td>
+          <td>字符串，必须<strong>匹配 config 中预定义的类别</strong></td>
+          <td>"good" / "neutral" / "bad"；"correct" / "partial" / "wrong"</td>
+        </tr>
+        <tr>
+          <td><code>BOOLEAN</code></td>
+          <td>数字 <code>0</code> 或 <code>1</code>（v3 API 读出时是 bool）</td>
+          <td>pass / fail、含关键词 / 不含、JSON 可解析 / 不可解析</td>
+        </tr>
+        <tr>
+          <td><code>TEXT</code></td>
+          <td>非空字符串，<strong>1-500 字符</strong></td>
+          <td>judge 的 reasoning（一句话解释为何打这个分）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>CATEGORICAL 的 value 必须在 config 里预先定义；不写 config 直接发 "good" 会被服务端拒绝（HTTP 400）。生产做法是先在 UI 的 Score Configs 里建好类别，代码里只引用。
+    </div>
+
+    <h3>2.2 Score 可附加在 4 层</h3>
+    <p>这是 Lesson 0005 最容易记错的地方——Score 不是只能挂在 trace 上，它有 4 个合法的 parent：</p>
+
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <!-- Session -->
+      <rect x="280" y="20" width="200" height="44" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="380" y="40" text-anchor="middle" font-size="14" font-weight="700" fill="#0066cc">Session</text>
+      <text x="380" y="56" text-anchor="middle" font-size="11" fill="#666">用户的一次多轮对话</text>
+
+      <!-- 1:n 箭头 -->
+      <line x1="380" y1="66" x2="380" y2="100" stroke="#666" stroke-width="1" stroke-dasharray="4 3"/>
+      <text x="395" y="86" font-size="11" fill="#666">1 : n</text>
+
+      <!-- Trace -->
+      <rect x="280" y="100" width="200" height="44" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="380" y="120" text-anchor="middle" font-size="14" font-weight="700" fill="#0066cc">Trace</text>
+      <text x="380" y="136" text-anchor="middle" font-size="11" fill="#666">一次端到端调用</text>
+
+      <!-- 1:n 分叉 -->
+      <path d="M380,144 L380,170 M380,170 L200,170 L200,200 M380,170 L560,170 L560,200" stroke="#666" stroke-width="1" stroke-dasharray="4 3" fill="none"/>
+      <text x="395" y="186" font-size="11" fill="#666">1 : n</text>
+
+      <!-- Observation x2 -->
+      <rect x="80" y="200" width="240" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="200" y="220" text-anchor="middle" font-size="14" font-weight="700" fill="#8a6a17">Observation</text>
+      <text x="200" y="236" text-anchor="middle" font-size="11" fill="#666">LLM 调用 / Tool / Span</text>
+
+      <rect x="440" y="200" width="240" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="560" y="220" text-anchor="middle" font-size="14" font-weight="700" fill="#8a6a17">Observation</text>
+      <text x="560" y="236" text-anchor="middle" font-size="11" fill="#666">LLM 调用 / Tool / Span</text>
+
+      <!-- Score 连线（垂直向下）-->
+      <line x1="200" y1="246" x2="200" y2="270" stroke="#2d7a3d" stroke-width="1.5"/>
+      <line x1="560" y1="246" x2="560" y2="270" stroke="#2d7a3d" stroke-width="1.5"/>
+
+      <!-- Score -->
+      <rect x="80" y="270" width="600" height="40" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="380" y="290" text-anchor="middle" font-size="14" font-weight="700" fill="#2d7a3d">Score（4 种 data_type × 4 个 parent）</text>
+      <text x="380" y="304" text-anchor="middle" font-size="11" fill="#666">每次 attach 通过 trace_id / observation_id / session_id / dataset_run_id 区分</text>
+    </svg>
+
+    <p><strong>为什么有 4 层？</strong>每个粒度对应一种问题：</p>
+
+    <table>
+      <thead><tr><th>parent</th><th>适用问题</th><th>SDK 参数</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Trace</strong></td>
+          <td>这一整次调用答得好不好？（最常用）</td>
+          <td><code>score_current_trace(...)</code> 或 <code>create_score(trace_id=...)</code></td>
+        </tr>
+        <tr>
+          <td><strong>Observation</strong></td>
+          <td>这一<em>步</em> LLM 调用答得好不好？比如 agent 多步里的第二步是不是瞎说</td>
+          <td><code>span.score(...)</code> 或 <code>create_score(observation_id=...)</code></td>
+        </tr>
+        <tr>
+          <td><strong>Session</strong></td>
+          <td>用户这一整轮对话结束体验如何？</td>
+          <td><code>create_score(session_id=...)</code></td>
+        </tr>
+        <tr>
+          <td><strong>Dataset Run</strong></td>
+          <td>离线 experiment 里那条样本的整体评分（0006 详讲）</td>
+          <td>experiment runner 自动挂，不手写</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>经验法则：</strong>先想清楚你要回答"哪一层的问题"。如果不确定，从 <strong>trace 级</strong> 开始——99% 的评估挂 trace 就够了。
+    </div>
+
+    <h3>2.3 Score Configs（必填的元数据）</h3>
+    <p>生产部署里，每个 score name 必须先在 UI 上"声明"——叫什么名字、什么 data_type、取值范围是什么、谁负责维护。这就是 Score Config。</p>
+
+    <p>为什么有这个"配置"环节？三个原因：</p>
+    <ol>
+      <li><strong>校验输入</strong>：CATEGORICAL 的 value 必须是 config 里预定义的；NUMERIC 必须在 config 设的 min/max 之间</li>
+      <li><strong>Dashboard 渲染</strong>：UI 看到 config 就知道这列怎么画（图柱状图 vs 折线图 vs 分类卡）</li>
+      <li><strong>权限与所有权</strong>：config 里指定 owner team，谁来维护这个分；不同团队分独立编号空间</li>
+    </ol>
+
+    <p>最小做法：</p>
+
+    <pre><code># 一次性：在 UI 的 Score Configs 页面建好
+#   name: helpfulness, data_type: NUMERIC, min: 0, max: 1
+#   name: tone,        data_type: CATEGORICAL, categories: ["good","neutral","bad"]
+#   name: user-feedback, data_type: BOOLEAN
+
+# 之后代码里只用名字引用
+lf.score_current_trace(name="helpfulness", value=0.85, data_type="NUMERIC")</code></pre>
+
+    <h3>2.4 Score vs Metadata 边界</h3>
+    <p>这是新人最常混的概念。两者都是附加信息，但用途完全不同：</p>
+
+    <table>
+      <thead><tr><th>维度</th><th>Metadata</th><th>Score</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>目的</strong></td>
+          <td>描述这次调用的<em>上下文</em>（哪个环境、哪个 user、哪个 feature flag）</td>
+          <td>评价这次调用的<em>质量</em>（这条输出好不好、是不是正确）</td>
+        </tr>
+        <tr>
+          <td><strong>数据形态</strong></td>
+          <td>任意 dict，键值对</td>
+          <td>单值（+ 可选 comment + 可选 metadata）</td>
+        </tr>
+        <tr>
+          <td><strong>何时写</strong></td>
+          <td>trace 创建时或过程中</td>
+          <td>trace 完成后，由 evaluator 或人写入</td>
+        </tr>
+        <tr>
+          <td><strong>UI 上</strong></td>
+          <td>折叠的 "Metadata" 面板</td>
+          <td>独立的 "Scores" tab，可过滤、可聚合</td>
+        </tr>
+        <tr>
+          <td><strong>典型例</strong></td>
+          <td><code>environment=prod</code>, <code>user_id=u-9f3a</code>, <code>prompt_version=3</code></td>
+          <td><code>helpfulness=0.85</code>, <code>tone="good"</code>, <code>user-feedback=1</code></td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>一句话记法：</strong>Metadata 是"<em>这条 trace 是在什么条件下产生的</em>"；Score 是"<em>这条 trace 的产出好不好</em>"。
+    </div>
+
+    <h3>2.5 低层 API：`create_score`</h3>
+    <p>所有打分最终都落到一个统一的低层方法 <code>create_score</code>。先看这个，后面所有写法都是它的封装：</p>
+
+    <pre><code>from langfuse import get_client
+
+lf = get_client()
+
+# 4 种 parent × 4 种 data_type 的组合
+lf.create_score(
+    name="helpfulness",        # 必须先在 UI Score Configs 里建好
+    value=0.85,                 # 按 data_type 取值
+    data_type="NUMERIC",        # 4 选 1
+
+    # 4 选 1 的 parent 字段（至少填一个）：
+    trace_id="01H...",          # 挂 trace
+    # observation_id="...",    # 挂某个 observation（必须同时给 trace_id）
+    # session_id="sess-abc",   # 挂 session（不与 trace/observation 关联）
+    # dataset_run_id="...",    # 挂 dataset run（实验场景，0006 详讲）
+
+    comment="Correct and concise",   # 可选，TEXT 类型 1-500 字符
+    # config_id="...",                # 可选，关联到 Score Config
+    # score_id="...",                 # 可选，幂等键
+)</code></pre>
+
+    <p><strong>代码逐行说明：</strong></p>
+    <ul>
+      <li><code>name</code>：必须先在 UI Score Configs 注册，否则 CATEGORICAL 会被服务端 400 拒绝</li>
+      <li><code>value</code>：随 data_type 走。BOOLEAN 必须 0/1，TEXT 必须 1-500 字符</li>
+      <li><code>data_type</code>：显式声明比不写好（不写会让服务端推断；推断错版本就翻车）</li>
+      <li><code>trace_id / observation_id / session_id / dataset_run_id</code>：4 选 1+。挂 observation 时<strong>必须</strong>同时给 trace_id（Langfuse 用它做完整性校验）</li>
+      <li><code>comment</code>：评分理由。LLM-as-a-Judge 场景下基本必填，否则事后分不清分是怎么打出来的</li>
+    </ul>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>4 个 parent 字段同时填会怎样？服务端只认第一个非空，其他忽略。所以挂 observation 时必须<strong>只填 trace_id + observation_id</strong>，别加 session_id 进去。
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>3. Evaluator 是一等公民</h2>
+    <!-- ============================================================ -->
+
+    <h3>3.1 v3+ 推荐模式：Evaluator + Rule</h3>
+    <p>直接 <code>score_current_trace()</code> 写死在业务代码里——能用，但有两个问题：</p>
+
+    <ol>
+      <li><strong>评分逻辑耦合业务代码</strong>：改了打分标准要发版</li>
+      <li><strong>不能选择性采样</strong>：要么全打要么全不打；production 上 LLM Judge 成本吃不消</li>
+    </ol>
+
+    <p>Langfuse v3+ 的解决方式是<strong>把 Evaluator + Rule 抽到平台层</strong>。业务代码只管产生 trace，平台决定哪些 trace 给哪个 evaluator 打：</p>
+
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <!-- 业务代码 -->
+      <rect x="20" y="20" width="220" height="60" rx="6" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="130" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#2d7a3d">业务代码</text>
+      <text x="130" y="62" text-anchor="middle" font-size="11" fill="#444">调 LLM + 上报 trace</text>
+      <text x="130" y="76" text-anchor="middle" font-size="11" fill="#666" font-style="italic">（不写任何打分代码）</text>
+
+      <!-- Trace -->
+      <rect x="280" y="20" width="180" height="60" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="370" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#0066cc">Trace 入库</text>
+      <text x="370" y="62" text-anchor="middle" font-size="11" fill="#444">观察数据流</text>
+
+      <!-- Rule -->
+      <rect x="500" y="20" width="240" height="60" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="620" y="44" text-anchor="middle" font-size="14" font-weight="700" fill="#8a6a17">Rule 触发</text>
+      <text x="620" y="62" text-anchor="middle" font-size="11" fill="#444">filter + sampling rate</text>
+
+      <!-- Evaluator -->
+      <rect x="500" y="120" width="240" height="60" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="620" y="144" text-anchor="middle" font-size="14" font-weight="700" fill="#8a6a17">Evaluator 执行</text>
+      <text x="620" y="162" text-anchor="middle" font-size="11" fill="#444">Code / LLM-as-a-Judge / 人工</text>
+
+      <!-- Score -->
+      <rect x="500" y="220" width="240" height="60" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="620" y="244" text-anchor="middle" font-size="14" font-weight="700" fill="#2d7a3d">Score 落库</text>
+      <text x="620" y="262" text-anchor="middle" font-size="11" fill="#444">关联回原 trace</text>
+
+      <!-- 箭头 -->
+      <path d="M240,50 L280,50" stroke="#666" stroke-width="1.5" fill="none"/>
+      <path d="M460,50 L500,50" stroke="#666" stroke-width="1.5" fill="none"/>
+      <path d="M620,82 L620,118" stroke="#666" stroke-width="1.5" fill="none"/>
+      <path d="M620,182 L620,218" stroke="#666" stroke-width="1.5" fill="none"/>
+
+      <!-- 旁注 -->
+      <text x="130" y="120" text-anchor="middle" font-size="11" fill="#666">Python / LangGraph agent</text>
+      <text x="130" y="138" text-anchor="middle" font-size="11" fill="#666">就一句 CallbackHandler</text>
+
+      <text x="620" y="98" text-anchor="middle" font-size="11" fill="#8a6a17" font-weight="600">match?</text>
+    </svg>
+
+    <p><strong>核心收益</strong>：</p>
+    <ul>
+      <li>改打分逻辑 / 调 sampling rate → <strong>UI 改完立即生效</strong>，不用发版</li>
+      <li>同一个 trace 可以挂多个 evaluator（一个评 helpfulness，一个评 tone）</li>
+      <li>成本可控：sampling rate 0.1 表示只评 10% 的 trace</li>
+    </ul>
+
+    <h3>3.2 Rule = filter + sampling rate</h3>
+    <p>Rule 是 Evaluator 的<strong>触发器</strong>。两条核心配置：</p>
+
+    <table>
+      <thead><tr><th>配置</th><th>做什么</th><th>例子</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>filter</strong></td>
+          <td>选目标 observation（SQL-like 条件）</td>
+          <td><code>isRootObservation = true AND tags contains "prod"</code></td>
+        </tr>
+        <tr>
+          <td><strong>sampling rate</strong></td>
+          <td>匹配的 trace 里再抽多少比例真打</td>
+          <td>filter 命中后只评 10%（成本控制）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>两个例子，差别立现：</p>
+
+    <pre><code># 例 1：评所有 prod 环境里 root observation 的输出
+filter: isRootObservation = true AND environment = "prod"
+sampling_rate: 1.0   # 100%，prod 全打
+
+# 例 2：评 5% 的所有 trace（成本敏感型 LLM Judge）
+filter: isRootObservation = true
+sampling_rate: 0.05</code></pre>
+
+    <div class="callout">
+      <strong>直觉：</strong>Rule 像<em>水龙头</em>——filter 是"哪些 trace 流过这里"，sampling rate 是"流过的有百分之几真接上 evaluator"。
+    </div>
+
+    <h3>3.3 Observation-level 是首选（⚠️ trace-level v4 弃用）</h3>
+    <p>Evaluator 挂在哪个层级也是个非显然的选择。Langfuse v3 时可以挂 trace 级和 observation 级；<strong>v4 把 trace 级弃用了</strong>（2026-11-16 cutover）。</p>
+
+    <table>
+      <thead><tr><th>层级</th><th>何时评</th><th>取舍</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Observation-level</strong> ✅ 推荐</td>
+          <td>每条 observation 独立跑 evaluator</td>
+          <td>更精确的 target（按 observation 类型过滤）；秒级完成；可对同 trace 不同 observation 跑不同 evaluator</td>
+        </tr>
+        <tr>
+          <td><strong>Trace-level</strong> ⚠️ v4 弃用</td>
+          <td>整条 trace 跑一个 evaluator</td>
+          <td>上下文更全（能看到多步），<strong>但 v4 不再支持</strong>。新项目一律走 observation-level</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p>observation-level evaluator 的 filter 经典模板：</p>
+
+    <pre><code>{
+  "type": "boolean",
+  "column": "isRootObservation",
+  "operator": "=",
+  "value": true
+}</code></pre>
+
+    <p>意思是"挑出每条 trace 的根节点"——大多数 LLM-as-a-Judge 想评估的就是根节点的那次 LLM 调用（agent 决策层）。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>v4 self-hosted 默认就启用了 deprecation。trace-level evaluator 配了会报 warning 但仍能跑（迁移期内）；2026-11-16 之后强切。新项目直接 observation-level，<strong>不要在 lesson 演示 trace-level</strong>。
+    </div>
+
+    <h3>3.4 Evaluator 的 3 种实现</h3>
+    <p>虽然 Evaluator 在 UI 上是统一概念，但它有 3 种实现方式——这一节给个总览，Part 2 逐个讲细节：</p>
+
+    <table>
+      <thead><tr><th>类型</th><th>用 SDK 还是 UI</th><th>何时用</th><th>代码约束</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Code Evaluator</strong></td>
+          <td>UI 注册（更主流）或 inline</td>
+          <td>确定性检查：JSON 合法、长度限制、关键词、exact match</td>
+          <td>stdlib only / 2s 超时 / &lt;256 KB</td>
+        </tr>
+        <tr>
+          <td><strong>LLM-as-a-Judge</strong></td>
+          <td>UI 注册（带版本）</td>
+          <td>语义判断：helpfulness、tone、correctness、是否礼貌</td>
+          <td>judge prompt 三段式；用 Evaluator 自带版本管，不用 Prompt Management</td>
+        </tr>
+        <tr>
+          <td><strong>Annotation Queue</strong></td>
+          <td>UI 操作</td>
+          <td>内部专家标注；LLM Judge 不确定的样本</td>
+          <td>人工操作，无代码</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>Part 2 预告：</strong>下两节（part 2 和 part 3）会逐个讲：① 手工 SDK 调 <code>score_current_trace</code>（不依赖 UI）② Code Evaluator 的 UI 注册和 inline 写法 ③ LLM-as-a-Judge 的 prompt 设计 ④ Annotation Queue 工作流 ⑤ 用户反馈闭环 ⑥ UI + Analytics 查分。
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>4. 一句话总结</h2>
+    <!-- ============================================================ -->
+
+    <p><strong>Score = 4 种 data_type × 4 个 parent × 3 种 Evaluator 实现。生产模式是 UI 上注册 Evaluator + Rule，业务代码只管产生 trace。</strong></p>
+    <p>Part 2 我们把 3 种 Evaluator 实现逐个拆开看：手工 SDK → Code → LLM-as-a-Judge。</p>
+
+    <div class="task">
+      <strong>🎯 动手任务（10 分钟）</strong>
+      <ol>
+        <li>浏览器打开 <code>localhost:3000</code> → 左侧 <em>Score Configs</em> → <code>+ New Score Config</code> 建 3 个：<code>helpfulness</code>(NUMERIC 0-1)、<code>tone</code>(CATEGORICAL good/neutral/bad)、<code>user-feedback</code>(BOOLEAN)</li>
+        <li>打开 lesson 0004 跑出来的任一条 <code>movie-critic</code> trace（按 trace_name 过滤）→ 点 <em>Annotate</em> → 选 <code>helpfulness</code> → 给个分数（比如 0.7）</li>
+        <li>回 Score Configs 页面，确认刚才那个 score 已经写进去了（看 score name 下的 counter）</li>
+        <li>打开 Score Analytics tab，看一眼 <code>helpfulness</code> 的分布（应该是个单点 0.7）</li>
+        <li>（加分）换个 observation 级的 evaluator concept：在脑子里想一个你业务里的 LLM 调用，应该用什么 data_type + filter 评估？写一句话描述</li>
+      </ol>
+    </div>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0005-02-scoring-evaluators.html">Lesson 0005 · Part 2 · Evaluator 三种实现（SDK / Code / LLM-as-a-Judge）→</a><br>
+      本节参考：<a href="https://langfuse.com/docs/evaluation/core-concepts">Langfuse Docs · Core Concepts</a> · <a href="https://langfuse.com/docs/evaluation/scores/overview">Score Overview</a> · <a href="https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge">LLM-as-a-Judge</a><br>
+      相关：<a href="../reference/glossary.html">术语表 · Score / Evaluator</a> · <a href="0004-prompt-management.html">Lesson 0004 · Prompt Management</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent 集成 Metadata Cheatsheet · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html" class="active">字段表</a></li>
+      <li><a href="prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本表目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · METADATA CHEATSHEET</div>
+      <h1>Agent 集成：metadata 设置哪些内容</h1>
+      <div class="meta">一次性查询表 · 告诉你 session_id / user_id / tags / metadata 各放什么、怎么设</div>
+    </header>
+
+    <div class="objective">
+      <strong>本表目标</strong><br>
+      集成 Langfuse 到 agent 时，<strong>4 类附加信息</strong>（session_id / user_id / tags / metadata）该放什么、怎么设、避坑清单。
+    </div>
+
+    <h2>1. 先理清一个概念：metadata 不是全部</h2>
+    <p>Langfuse 一条 trace 上能附加 <strong>5 类信息</strong>，不是 metadata 一锅端：</p>
+
+    <table>
+      <thead><tr><th>类型</th><th>设置位置</th><th>UI 上长什么样</th></tr></thead>
+      <tbody>
+        <tr><td><strong>session_id</strong></td><td>顶级字段</td><td>trace 顶部一栏，可聚合整个会话</td></tr>
+        <tr><td><strong>user_id</strong></td><td>顶级字段</td><td>trace 顶部一栏，可按用户聚合</td></tr>
+        <tr><td><strong>tags</strong></td><td>顶级字段（数组）</td><td>trace 顶部 chip，可过滤</td></tr>
+        <tr><td><strong>trace_name</strong></td><td>顶级字段</td><td>左侧 Tracing 列表里显示</td></tr>
+        <tr><td><strong>metadata</strong></td><td>任意键值对 dict</td><td>"Metadata" 折叠面板</td></tr>
+      </tbody>
+    </table>
+
+    <p>所以"metadata 设置哪些内容"其实要回答 5 个子问题。下面逐个回答。</p>
+
+    <h2>2. session_id — 多轮对话的关联纽带</h2>
+
+    <h3>什么时候设</h3>
+    <p>凡是涉及"用户连续问几轮"的场景都要设：</p>
+    <table>
+      <thead><tr><th>场景</th><th>session_id 策略</th></tr></thead>
+      <tbody>
+        <tr><td>客服对话</td><td>同一会话内所有 trace 共用一个 session_id</td></tr>
+        <tr><td>单次 ReAct Agent</td><td>一次用户提问 = 一个 session_id（即使内部多次 tool call）</td></tr>
+        <tr><td>批处理任务</td><td>每个 batch = 一个 session_id（聚合这批的 stats）</td></tr>
+      </tbody>
+    </table>
+
+    <h3>值怎么生成</h3>
+    <pre><code>import uuid
+session_id = f"sess-{uuid.uuid4().hex[:12]}"</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>不要用明文邮箱 / 手机号当 session_id（涉及 GDPR / 隐私合规）。前端传上来时先哈希。
+    </div>
+
+    <h2>3. user_id — 强烈推荐</h2>
+    <p>即使不知道真实身份，也可以用 IP + UA 哈希：</p>
+    <pre><code>import hashlib
+user_id = hashlib.sha256(f"{ip}-{ua}".encode()).hexdigest()[:16]</code></pre>
+
+    <p>UI 上 user_id 字段打开后能直接看：<strong>这个用户最近 50 次 trace、平均多少 token、成功率多少</strong>。在做质量回溯时巨有用。</p>
+
+    <h2>4. trace_name — 让 trace 在 UI 里好认</h2>
+    <p>默认会显示类名（<code>LangGraph</code> / <code>ChatOpenAI</code>）这种没意义的东西。一定要覆盖：</p>
+    <pre><code>"langfuse_trace_name": "research-agent-v2"</code></pre>
+
+    <p>命名建议：<code>{业务线}-{agent 名}-{版本}</code> 或 <code>{用户动作}-{特征}</code>。例如 <code>checkout-recommend-v3</code>、<code>user-question-first-turn</code>。</p>
+
+    <h2>5. tags — 最便宜的维度切分</h2>
+
+    <table>
+      <thead><tr><th>用途</th><th>示例值</th></tr></thead>
+      <tbody>
+        <tr><td>环境</td><td><code>prod</code> / <code>staging</code> / <code>dev</code></td></tr>
+        <tr><td>业务线</td><td><code>checkout</code> / <code>recommendation</code> / <code>support</code></td></tr>
+        <tr><td>实验</td><td><code>ab-A</code> / <code>ab-B</code> / <code>canary</code></td></tr>
+        <tr><td>状态</td><td><code>error</code> / <code>timeout</code> / <code>retry</code></td></tr>
+        <tr><td>特征</td><td><code>streaming</code> / <code>multimodal</code> / <code>function-call</code></td></tr>
+      </tbody>
+    </table>
+
+    <p>tag 的核心价值是<strong>过滤</strong>。在 UI 顶部搜索栏打 <code>tag:prod</code> 就能只看生产环境的 trace。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>tag 是字符串数组，<strong>不要堆太多</strong>（建议 ≤ 5 个）。高基数 tag（如 <code>uuid-per-request</code>）失去过滤意义。
+    </div>
+
+    <h2>6. metadata dict 放什么（核心问题）</h2>
+
+    <h3>必设（一个不能少）</h3>
+    <table>
+      <thead><tr><th>Key</th><th>类型</th><th>示例</th><th>为什么</th></tr></thead>
+      <tbody>
+        <tr><td><code>agent_name</code></td><td>str</td><td><code>"research-agent"</code></td><td>区分多个 agent 定义（同一服务可能跑多个 agent）</td></tr>
+        <tr><td><code>agent_version</code></td><td>str</td><td><code>"2.1.0"</code> 或 git sha</td><td>跨版本对比、灰度验证、回归测试</td></tr>
+        <tr><td><code>environment</code></td><td>str</td><td><code>"prod"</code></td><td>等同 tag，但 metadata 更结构化、易聚合</td></tr>
+      </tbody>
+    </table>
+
+    <h3>推荐设</h3>
+    <table>
+      <thead><tr><th>Key</th><th>类型</th><th>示例</th><th>何时用</th></tr></thead>
+      <tbody>
+        <tr><td><code>app_version</code></td><td>str</td><td><code>"1.4.2"</code></td><td>应用包版本（区别于 agent 版本）</td></tr>
+        <tr><td><code>deployment_id</code></td><td>str</td><td><code>"pod-7f3a"</code></td><td>多副本时定位是哪台机器出了问题</td></tr>
+        <tr><td><code>request_id</code></td><td>str</td><td><code>"req-2026-09-16-xxx"</code></td><td>与上游追踪系统（OpenTelemetry / Sentry）对齐</td></tr>
+        <tr><td><code>input_source</code></td><td>str</td><td><code>"web"</code> / <code>"api"</code> / <code>"cron"</code></td><td>区分请求来源</td></tr>
+        <tr><td><code>feature_flags</code></td><td>dict</td><td><code>{"new_prompt": true}</code></td><td>关联 A/B 测试 / 灰度开关</td></tr>
+        <tr><td><code>model_config</code></td><td>dict</td><td><code>{"temperature": 0, "max_tokens": 1024}</code></td><td>同一模型不同参数下的对比</td></tr>
+      </tbody>
+    </table>
+
+    <h3>选设（看场景）</h3>
+    <table>
+      <thead><tr><th>场景</th><th>推荐加的 metadata</th></tr></thead>
+      <tbody>
+        <tr><td>多 agent 协同</td><td><code>parent_agent_id</code>、<code>delegation_reason</code></td></tr>
+        <tr><td>RAG 应用</td><td><code>retriever</code>、<code>retrieved_doc_count</code>、<code>retrieval_score_avg</code></td></tr>
+        <tr><td>业务追踪</td><td><code>product_id</code>、<code>order_id</code>、<code>customer_tier</code></td></tr>
+        <tr><td>工具调用</td><td><code>tool_version</code>、<code>tool_retry_count</code></td></tr>
+        <tr><td>多语言</td><td><code>user_locale</code>、<code>input_language</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>7. 设置方式（3 种）</h2>
+
+    <h3>方式 A：LangChain metadata 入口（最常用）</h3>
+    <p>直接放在 invoke 的 config 里：</p>
+    <pre><code>from langfuse.langchain import CallbackHandler
+
+handler = CallbackHandler()
+config = {
+    "callbacks": [handler],
+    "metadata": {
+        # langfuse 约定 key（带前缀）— 自动识别
+        "langfuse_session_id": "sess-abc123",
+        "langfuse_user_id": "u-9f3a",
+        "langfuse_tags": ["prod", "agent"],
+        "langfuse_trace_name": "research-agent-v2",
+
+        # 普通 metadata — 原样存
+        "agent_name": "research-agent",
+        "agent_version": "2.1.0",
+        "environment": "prod",
+        "deployment_id": "pod-7f3a",
+        "feature_flags": {"new_prompt": True},
+    },
+}
+result = agent.invoke(input, config=config)</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>四个 langfuse 约定 key 必须带 <code>langfuse_</code> 前缀。裸 <code>session_id</code> 不会触发任何特殊处理——它会被当成普通 metadata。
+    </div>
+
+    <h3>方式 B：propagate_attributes（上下文管理器）</h3>
+    <p>适合中间件或外层装饰器，自动传播到所有子 observation：</p>
+    <pre><code>from langfuse import propagate_attributes
+
+with propagate_attributes(
+    user_id="u-9f3a",
+    session_id="sess-abc123",
+    tags=["prod"],
+    metadata={"agent_version": "2.1.0"},
+):
+    result = agent.invoke(input, config={"callbacks": [handler]})</code></pre>
+
+    <p>这个写法的好处：<strong>不需要把 metadata 字典塞到 config 里</strong>，适合外层框架代码。缺点是侵入性更强（用了 with 块）。</p>
+
+    <h3>方式 C：在 custom Span 里手动 update</h3>
+    <p>适合嵌套业务逻辑，给特定一段加专属 metadata：</p>
+    <pre><code>from langfuse import get_client
+
+lf = get_client()
+with lf.start_as_current_observation(
+    as_type="span", name="preprocess"
+) as span:
+    span.update(metadata={"step": "user_lookup", "matched": True})
+    user = lookup_user(user_id)</code></pre>
+
+    <h2>8. UI 上怎么查</h2>
+    <table>
+      <thead><tr><th>想看什么</th><th>怎么查</th></tr></thead>
+      <tbody>
+        <tr><td>某条 trace 的 metadata</td><td>点开 trace → 顶部 "Metadata" 折叠面板</td></tr>
+        <tr><td>按 session_id 看所有 trace</td><td>左侧 <em>Sessions</em> 标签页 → 输入 session_id</td></tr>
+        <tr><td>按 user_id 看统计</td><td>左侧 <em>Users</em> 标签页</td></tr>
+        <tr><td>按 tag 过滤</td><td>顶部搜索栏 <code>tag:prod</code></td></tr>
+        <tr><td>按 metadata 字段过滤</td><td>顶部搜索栏 <code>metadata.environment=prod</code></td></tr>
+        <tr><td>多条件</td><td><code>tag:prod metadata.environment=prod session_id:sess-abc</code></td></tr>
+      </tbody>
+    </table>
+
+    <h2>9. ⚠️ 不要放什么</h2>
+    <table>
+      <thead><tr><th>不要放</th><th>为什么</th><th>替代</th></tr></thead>
+      <tbody>
+        <tr><td>PII（明文邮箱 / 手机号 / 身份证）</td><td>GDPR / 隐私合规</td><td>哈希后当 user_id</td></tr>
+        <tr><td>大段 prompt / response 原文</td><td>已经有 input / output 字段，重复浪费存储</td><td>不放</td></tr>
+        <tr><td>高基数 ID（每条都不同的 UUID）</td><td>失去聚合意义</td><td>放但用低基数 tag 聚合</td></tr>
+        <tr><td>密钥 / Token / 密码</td><td>安全隐患（哪怕自托管也有日志泄漏风险）</td><td>永不放</td></tr>
+        <tr><td>业务核心数据（订单详情、银行卡）</td><td>合规问题</td><td>只放脱敏后的引用 ID</td></tr>
+        <tr><td>巨大嵌套对象（&gt;10 KB）</td><td>UI 渲染慢、查询慢</td><td>用 Langfuse Media API 存</td></tr>
+      </tbody>
+    </table>
+
+    <h2>10. 完整示例：Agent 一次性带上全部</h2>
+    <pre><code>import os, uuid, hashlib
+from langfuse.langchain import CallbackHandler
+
+def build_agent_config(request) -> dict:
+    user_id = hashlib.sha256(
+        f"{request.ip}-{request.ua}".encode()
+    ).hexdigest()[:16]
+
+    return {
+        "callbacks": [CallbackHandler()],
+        "metadata": {
+            # 4 个 langfuse 约定 key
+            "langfuse_session_id": request.session_id or f"sess-{uuid.uuid4().hex[:12]}",
+            "langfuse_user_id": user_id,
+            "langfuse_tags": [os.getenv("ENV", "dev"), "agent", "v2"],
+            "langfuse_trace_name": f"checkout-recommend-v2-{request.turn}",
+
+            # 业务 metadata
+            "agent_name": "checkout-recommender",
+            "agent_version": "2.1.0",
+            "environment": os.getenv("ENV", "dev"),
+            "deployment_id": os.getenv("POD_NAME", "local"),
+            "app_version": "1.4.2",
+            "input_source": request.source,           # "web" / "api"
+            "feature_flags": {"new_ranker": True},
+            "model_config": {"temperature": 0.3, "max_tokens": 512},
+            "customer_tier": request.user_tier,
+        },
+    }
+
+# 用
+result = agent.invoke(input, config=build_agent_config(request))</code></pre>
+
+    <h2>11. 速查卡（一页打印版）</h2>
+    <pre><code>┌─ 4 个 langfuse_* 顶级字段 ─────────────────────────┐
+│ langfuse_session_id    → 多轮聚合                   │
+│ langfuse_user_id       → 用户级聚合                 │
+│ langfuse_tags          → 过滤 (env/feature/experiment) │
+│ langfuse_trace_name    → 覆盖默认 trace 名          │
+└────────────────────────────────────────────────────┘
+
+┌─ metadata 必设 3 项 ────────────────────────────────┐
+│ agent_name      "research-agent"                    │
+│ agent_version   "2.1.0" 或 git sha                  │
+│ environment     "prod" / "staging" / "dev"          │
+└────────────────────────────────────────────────────┘
+
+┌─ metadata 推荐 6 项 ────────────────────────────────┐
+│ app_version, deployment_id, request_id,             │
+│ input_source, feature_flags, model_config           │
+└────────────────────────────────────────────────────┘
+
+⚠️ 不要放：PII、大段原文、高基数 ID、密钥</code></pre>
+
+    <footer class="lesson-footer">
+      引用：<a href="../RESOURCES.md">RESOURCES.md · LangChain Integration</a><br>
+      相关：<a href="glossary.html">术语表 · Trace / Metadata / Tags / Session</a> · <a href="../lessons/0003-langgraph-react-agent.html">Lesson 0003 · ReAct Agent 接入</a><br>
+      Prompt 主题参考：<a href="prompt-data-model.html">数据模型</a> · <a href="prompt-code-integration.html">代码接入</a> · <a href="prompt-operations-playbook.html">运维 SOP</a> · <a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

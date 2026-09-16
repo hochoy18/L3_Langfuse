@@ -1,0 +1,631 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0005 · Part 3 · 人工打分 · UI 与 Analytics · 坑汇总</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt</a></li>
+      <li><a href="../lessons/0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="../lessons/0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html" class="active">0005 · 评分(3/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0005 · EVALUATION · PART 3 of 3</div>
+      <h1>人工打分 · UI 与 Analytics · 坑汇总</h1>
+      <div class="meta">预计 50 分钟 · 难度 ★★★☆☆ · 涵盖 §7-10；Part 1 讲 Score 4×4 矩阵，Part 2 讲三种 Evaluator 实现，本节落地人工路径 + 查分 + 排雷</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节 4 个目标</strong>
+      <ol>
+        <li>区分 <strong>Annotation Queue</strong>（内部专家）与 <strong>User Feedback</strong>（终端用户）两条人工路径</li>
+        <li>会用 <strong>Browser SDK / REST API</strong> 上报用户反馈到 trace</li>
+        <li>会用 <strong>Score Analytics 仪表板</strong>（stats / 分布 / 趋势 / 双 score 比较）</li>
+        <li>建立<strong>完整排查 SOP</strong>：score 不出现 / 被覆盖 / 烧钱 等 7 类常见坑</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>7. 人工打分两条路径</h2>
+    <!-- ============================================================ -->
+
+    <h3>7.1 Annotation Queue vs User Feedback</h3>
+    <p>Langfuse 把"人工评分"分成<strong>两条独立路径</strong>——很多人误把它们合并，实际是两种角色 + 两种入口 + 两种数据流：</p>
+
+    <table>
+      <thead><tr><th>维度</th><th>Annotation Queue</th><th>User Feedback</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>角色</strong></td>
+          <td>内部标注者：PM / 领域专家 / 标注员</td>
+          <td>终端用户：app 的实际使用者</td>
+        </tr>
+        <tr>
+          <td><strong>入口</strong></td>
+          <td>Langfuse UI 的 Annotation Queue 页面</td>
+          <td>产品内嵌的 👍 / 👎 按钮 / Browser SDK / REST API</td>
+        </tr>
+        <tr>
+          <td><strong>数据流</strong></td>
+          <td>Admin 主动 curate 一批数据让人评（queue + 处理）</td>
+          <td>Runtime 被动收集（用户点击）</td>
+        </tr>
+        <tr>
+          <td><strong>典型场景</strong></td>
+          <td>难样本精标 / LLM Judge 不确定的 case / 校准 baseline</td>
+          <td>线上 app 的 👍👎 / 5 星评分 / 反馈文本</td>
+        </tr>
+        <tr>
+          <td><strong>量级</strong></td>
+          <td>百到千级 / 周期</td>
+          <td>日均万到百万级</td>
+        </tr>
+        <tr>
+          <td><strong>延迟</strong></td>
+          <td>小时到天（人工处理）</td>
+          <td>毫秒级（API 上报）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>直觉：</strong>Annotation Queue = "我把数据放进盒子里让人来打分"；User Feedback = "用户在我的产品里点了个按钮"。两种人工，但工作流和数据流完全不同。
+    </div>
+
+    <h3>7.2 Annotation Queue 工作流</h3>
+
+    <svg viewBox="0 0 760 240" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s3-arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- 步骤 1：创建队列 -->
+      <rect x="20" y="20" width="140" height="50" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="90" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">1. 创建队列</text>
+      <text x="90" y="58" text-anchor="middle" font-size="10" fill="#666">Name + Score Configs</text>
+
+      <!-- 步骤 2：批量入队 -->
+      <rect x="200" y="20" width="140" height="50" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="270" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">2. 批量入队</text>
+      <text x="270" y="58" text-anchor="middle" font-size="10" fill="#666">从 trace 列表勾选</text>
+
+      <!-- 步骤 3：分配标注者 -->
+      <rect x="380" y="20" width="140" height="50" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="450" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">3. 分配</text>
+      <text x="450" y="58" text-anchor="middle" font-size="10" fill="#666">指定 user / team</text>
+
+      <!-- 步骤 4：处理 + 推进 -->
+      <rect x="560" y="20" width="180" height="50" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="650" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#2d7a3d">4. 处理 + 推进</text>
+      <text x="650" y="58" text-anchor="middle" font-size="10" fill="#444">打分 → Complete + next</text>
+
+      <path d="M160,45 L200,45" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr)" fill="none"/>
+      <path d="M340,45 L380,45" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr)" fill="none"/>
+      <path d="M520,45 L560,45" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr)" fill="none"/>
+
+      <!-- 标注细节 -->
+      <rect x="20" y="120" width="720" height="100" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="40" y="144" font-size="12" font-weight="700" fill="#8a6a17">4 个步骤的关键操作</text>
+      <text x="40" y="166" font-size="11" fill="#222">1. 顶部 <em>New Queue</em> 按钮 → 选 Score Configs（决定要打的分有哪些）→ 命名</text>
+      <text x="40" y="184" font-size="11" fill="#222">2. Trace 列表 checkbox + Actions → Add to queue（可批量）</text>
+      <text x="40" y="200" font-size="11" fill="#222">3. 在队列设置里指定 assignee user（多人并行处理不同 trace）</text>
+    </svg>
+
+    <h3>7.3 创建队列 + 批量入队 + 处理（最简步骤）</h3>
+    <p>UI 入口都在顶栏 <em>Annotations</em> 标签页：</p>
+    <ol>
+      <li><strong>创建队列</strong>：<em>New Queue</em> → 选 Score Configs（预先建好的评分模板）→ 命名 → 描述 → 可选分配 user</li>
+      <li><strong>添加 trace</strong>：从 Tracing 列表勾选若干 trace → Actions → Add to queue</li>
+      <li><strong>处理</strong>：进入队列页 → 点 trace → 在右侧 Annotate 卡上打 Score Configs 列出的所有分 → <em>Complete + next</em> 推进下一条</li>
+      <li><strong>查询结果</strong>：队列的 Score Configs 名下的 score 全部进入 dashboard，可按 queue 过滤</li>
+    </ol>
+
+    <div class="callout warn">
+      <strong>⚠️ 关键：</strong>Score Configs 必须先在 UI 建好（lesson 0005-01 §2.3），queue 创建时选它——queue 处理时打分用的就是这个 config 的 data_type + categories。
+    </div>
+
+    <h3>7.4 User Feedback 闭环</h3>
+
+    <svg viewBox="0 0 760 280" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s3-arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- User -->
+      <rect x="20" y="20" width="100" height="44" rx="6" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="70" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#2d7a3d">User</text>
+      <text x="70" y="56" text-anchor="middle" font-size="10" fill="#444">点 👍</text>
+
+      <!-- Web App -->
+      <rect x="180" y="20" width="120" height="44" rx="6" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="240" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#0066cc">Web App</text>
+      <text x="240" y="56" text-anchor="middle" font-size="10" fill="#444">前端 + 后端</text>
+
+      <!-- API -->
+      <rect x="380" y="20" width="120" height="44" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="440" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#8a6a17">API</text>
+      <text x="440" y="56" text-anchor="middle" font-size="10" fill="#444">POST /scores</text>
+
+      <!-- Langfuse -->
+      <rect x="560" y="20" width="180" height="44" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="650" y="42" text-anchor="middle" font-size="12" font-weight="700" fill="#2d7a3d">Langfuse</text>
+      <text x="650" y="56" text-anchor="middle" font-size="10" fill="#444">写 Score 到 trace</text>
+
+      <path d="M120,42 L180,42" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr2)" fill="none"/>
+      <path d="M300,42 L380,42" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr2)" fill="none"/>
+      <path d="M500,42 L560,42" stroke="#666" stroke-width="1.5" marker-end="url(#s3-arr2)" fill="none"/>
+
+      <!-- 关键：trace_id 串联 -->
+      <rect x="20" y="100" width="720" height="60" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1"/>
+      <text x="40" y="124" font-size="12" font-weight="700" fill="#c0392b">关键：trace_id 必须从原请求的 trace 取出来，传到 web 端</text>
+      <text x="40" y="142" font-size="11" fill="#222">最简模式：后端 API 响应里直接附 <tspan font-family="ui-monospace,monospace">trace_id</tspan>；前端存到 sessionStorage；点击时 POST 带上</text>
+
+      <!-- 后续 -->
+      <rect x="20" y="180" width="720" height="80" rx="6" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1"/>
+      <text x="40" y="204" font-size="12" font-weight="700" fill="#2d7a3d">Score 入库后的影响</text>
+      <text x="40" y="222" font-size="11" fill="#222">• 该 trace 的 Scores tab 立即多一条 user-feedback score（实时可见）</text>
+      <text x="40" y="240" font-size="11" fill="#222">• 按 score 过滤：tag <em>和</em> score 组合（<code>score.user-feedback=1</code> 看所有 👍 用户）</text>
+      <text x="40" y="256" font-size="11" fill="#222">• 可关联 prompt version：回到这条 trace → Prompt 徽章 → 看哪版 prompt 收获 👍 多</text>
+    </svg>
+
+    <h3>7.5 Browser SDK 实战（web 端 👍👎）</h3>
+
+    <p>Browser SDK 是 Langfuse 给前端的官方 SDK——<strong>只在浏览器</strong>里跑，不依赖后端转发：</p>
+
+    <pre><code>// 浏览器端（TypeScript / React / Vue 都可）
+import { LangfuseBrowserClient } from "@langfuse/browser";
+
+// 1. 初始化（用 Public Key，仅前端可读）
+const lf = new LangfuseBrowserClient({
+  publicKey: process.env.NEXT_PUBLIC_LANGFUSE_PUBLIC_KEY!,
+  baseUrl: window.location.origin,   // 或 langfuse 域名
+});
+
+// 2. 用户点 👍 时上报
+async function onThumbsUp(traceId: string) {
+  await lf.score({
+    traceId: traceId,
+    name: "user-feedback",
+    value: 1,                          // BOOLEAN：1=👍, 0=👎
+    dataType: "BOOLEAN",
+    comment: "thumbs up via web UI",
+  });
+}
+
+// 3. traceId 从后端响应里取
+// 假设后端在 chat 响应里返回 { trace_id: "01H...", answer: "..." }
+// 前端存到 sessionStorage：sessionStorage.setItem("last_trace_id", traceId)
+// 点击 👍 时：onThumbsUp(sessionStorage.getItem("last_trace_id"))</code></pre>
+
+    <div class="callout">
+      <strong>为什么需要后端回传 traceId？</strong>
+      Browser SDK 默认不会自动拿到当前请求的 traceId（那是后端 SDK 产生的）。最简模式：后端在 chat 响应里加一个 <code>trace_id</code> 字段，前端在响应后存起来。
+    </div>
+
+    <h3>7.6 REST API 集成（web 后端 / 移动端）</h3>
+
+    <p>更灵活的选择：后端代前端发请求，统一控制权限 / 限流：</p>
+
+    <pre><code>import requests
+
+def record_user_feedback(
+    trace_id: str,
+    public_key: str,
+    secret_key: str,
+    langfuse_host: str,
+    thumbs_up: bool,
+    comment: str = "",
+):
+    """后端转发用户反馈到 Langfuse。可加限流、审计日志等。"""
+    response = requests.post(
+        f"{langfuse_host}/api/public/scores",
+        auth=(public_key, secret_key),       # ← 用 Secret Key 鉴权
+        headers={"Content-Type": "application/json"},
+        json={
+            "traceId": trace_id,
+            "name": "user-feedback",
+            "value": 1 if thumbs_up else 0,
+            "dataType": "BOOLEAN",
+            "comment": comment or ("thumbs up" if thumbs_up else "thumbs down"),
+        },
+        timeout=5,
+    )
+    response.raise_for_status()
+    return response.json()</code></pre>
+
+    <p><strong>逐行说明：</strong></p>
+    <ul>
+      <li><code>auth=(pk, sk)</code>：HTTP Basic Auth，Secret Key 必须在服务端用，绝不外泄</li>
+      <li><code>traceId</code>：camelCase 是 REST API 约定；SDK 里是 <code>trace_id</code> 蛇形命名</li>
+      <li><code>dataType</code>：camelCase 同理</li>
+      <li><code>timeout=5</code>：用户反馈链路不能阻塞主流程；失败时静默记日志即可</li>
+    </ul>
+
+    <h3>7.7 ⚠️ Anti-pattern：把 user feedback 当 ground truth</h3>
+
+    <div class="callout warn">
+      <strong>Anti-pattern：用 👍👎 直接当评测指标，prompt 优化只追求 👍 多。</strong><br><br>
+      <strong>为什么是坑：</strong>
+      <ul>
+        <li><strong>采样偏差</strong>——主动点 👍 的往往是开心 / 满意用户；沉默 / 不满用户不会反馈</li>
+        <li><strong>操纵风险</strong>——如果用户知道 👍 会让模型更"奉承"，prompt 会偏向讨好而非有用</li>
+        <li><strong>对长 query 不友好</strong>——复杂任务用户懒得评，得到的都是简单 case 的 👍</li>
+      </ul>
+      <strong>修复</strong>：把 user feedback 当<strong>辅助信号</strong>，主评测仍是 LLM-as-a-Judge + Code Evaluator + Annotation Queue。User feedback 用来发现"用户感知到的失败"——例如 <strong>👎 多 + LLM Judge 分数高</strong> = judge 漏判的痛点，专门投到 Annotation Queue 让专家精标。
+    </div>
+
+    <div class="task">
+      <strong>🎯 动手任务 §7（20 分钟）</strong>
+      <ol>
+        <li>打开 Langfuse UI → Annotations → → 选 5 条 lesson 0005-02 的 <code>judge-helpfulness</code> score 低的 trace → 加到新 queue "low-quality-review"</li>
+        <li>浏览器 → 创建 <code>quality</code> Score Config（CATEGORICAL: good / neutral / bad）→ 给 queue 选这个 config</li>
+        <li>UI 给每条 trace 打 quality 分 → 在 Scores tab 确认出现</li>
+        <li>运行 <code>src/apps/fuse/user_feedback_demo.py</code> → 它会 POST 一条 user-feedback score 给之前 scoring_demo 留下的那条 trace</li>
+        <li>回 UI 看那条 trace，应该多一条 <code>user-feedback</code> score</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>8. UI 查 Score + Score Analytics</h2>
+    <!-- ============================================================ -->
+
+    <h3>8.1 Trace 详情页的 Scores tab</h3>
+
+    <p>打开任一 trace，右上角的 <em>Scores</em> 标签页会列出挂在该 trace + 所有 observation 上的 score：</p>
+
+    <table>
+      <thead><tr><th>列</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Name</strong></td><td>评分名（如 <code>judge-helpfulness</code>）</td></tr>
+        <tr><td><strong>Value</strong></td><td>数值或类别</td></tr>
+        <tr><td><strong>Type</strong></td><td>NUMERIC / BOOLEAN / CATEGORICAL / TEXT</td></tr>
+        <tr><td><strong>Source</strong></td><td>SDK / Annotation Queue / Evaluator / REST</td></tr>
+        <tr><td><strong>Comment</strong></td><td>评分理由（可点开看完整）</td></tr>
+        <tr><td><strong>Timestamp</strong></td><td>评分时间</td></tr>
+        <tr><td><strong>Attached to</strong></td><td>trace / 哪个 observation</td></tr>
+      </tbody>
+    </table>
+
+    <h3>8.2 按 score 过滤</h3>
+    <p>Langfuse 顶部搜索栏支持组合过滤：</p>
+
+    <pre><code># 单 score
+score.user-feedback=1                  # 所有 👍
+score.judge-helpfulness &lt; 0.5          # 所有 judge 判低的
+
+# 多 score
+score.user-feedback=1 AND score.judge-helpfulness &gt; 0.8   # 双方都赞
+
+# 与 metadata 组合
+metadata.environment=prod AND score.helpfulness &gt; 0.7     # prod + 质量高
+
+# 与 tag 组合
+tag:experiment-A AND score.helpfulness &lt; 0.5              # 实验 A 组里差评的</code></pre>
+
+    <p>这是个超强的<strong>反向工程</strong>工具：发现一个回归 → 按 metadata 切片定位哪个 prompt / 哪个 user tier 出错。</p>
+
+    <h3>8.3 Score Analytics 仪表板</h3>
+    <p>顶部 <em>Scores → Analytics</em> 标签进入。4 个区域：</p>
+
+    <svg viewBox="0 0 760 320" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s3-arr3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- Top: 选 score 区域 -->
+      <rect x="20" y="20" width="720" height="36" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="36" y="42" font-size="12" font-weight="700" fill="#8a6a17">① Score 选择器（top）</text>
+      <text x="220" y="42" font-size="11" fill="#444">name=helpfulness / data_type=NUMERIC / 时间范围 / object type=Trace</text>
+
+      <!-- Middle: Stats 卡片 -->
+      <rect x="20" y="68" width="180" height="100" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1"/>
+      <text x="36" y="90" font-size="12" font-weight="700" fill="#0066cc">② Stats 卡片</text>
+      <text x="36" y="108" font-size="11" fill="#444">count / median / mean / mode / std</text>
+      <text x="36" y="124" font-size="11" fill="#444">"mean=0.72, std=0.15"</text>
+      <text x="36" y="140" font-size="11" fill="#444">→ 一眼看出分数波动</text>
+
+      <!-- Middle: 分布图 -->
+      <rect x="220" y="68" width="280" height="100" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="240" y="90" font-size="12" font-weight="700" fill="#8a6a17">③ 分布图</text>
+      <text x="240" y="108" font-size="11" fill="#444">NUMERIC → 10-bin histogram</text>
+      <text x="240" y="124" font-size="11" fill="#444">CATEGORICAL → bar chart</text>
+      <text x="240" y="140" font-size="11" fill="#444">BOOLEAN → 0/1 比例</text>
+
+      <!-- Middle: 趋势图 -->
+      <rect x="520" y="68" width="220" height="100" rx="4" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1"/>
+      <text x="540" y="90" font-size="12" font-weight="700" fill="#2d7a3d">④ Trend Over Time</text>
+      <text x="540" y="108" font-size="11" fill="#444">interval: 5m / 1h / 1d / 1w</text>
+      <text x="540" y="124" font-size="11" fill="#444">发版前后对比</text>
+      <text x="540" y="140" font-size="11" fill="#444">自动补 0（无数据段）</text>
+
+      <!-- 底部：双 score 比较区 -->
+      <rect x="20" y="190" width="720" height="110" rx="4" fill="#fdf3f1" stroke="#c0392b" stroke-width="1"/>
+      <text x="36" y="212" font-size="12" font-weight="700" fill="#c0392b">⑤ 双 Score 比较（同一 data_type）</text>
+      <text x="36" y="232" font-size="11" fill="#222">heat map / confusion matrix + 统计指标：</text>
+      <text x="36" y="250" font-size="11" fill="#222">• NUMERIC → Pearson / Spearman / MAE / RMSE</text>
+      <text x="36" y="266" font-size="11" fill="#222">• CATEGORICAL / BOOLEAN → Cohen's Kappa / F1 / Overall Agreement</text>
+      <text x="36" y="282" font-size="11" fill="#222">• Matched tab：两个 score 都挂在同一 parent 的样本（用于有效对比）</text>
+    </svg>
+
+    <h3>8.4 双 score 比较：何时用哪种指标</h3>
+
+    <table>
+      <thead><tr><th>指标</th><th>何时用</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Pearson</strong></td>
+          <td>两个 NUMERIC score 是否线性相关</td>
+          <td>-1 到 1；越接近 1 越相关</td>
+        </tr>
+        <tr>
+          <td><strong>Spearman</strong></td>
+          <td>同上但基于 rank（抗 outlier）</td>
+          <td>适合分布奇怪的数据</td>
+        </tr>
+        <tr>
+          <td><strong>MAE / RMSE</strong></td>
+          <td>两个 NUMERIC score 的<em>偏差</em>有多大</td>
+          <td>0 起，越大偏差越大</td>
+        </tr>
+        <tr>
+          <td><strong>Cohen's Kappa</strong></td>
+          <td>两个 CATEGORICAL / BOOLEAN 评分者的一致性</td>
+          <td>扣掉随机一致后的真正一致率</td>
+        </tr>
+        <tr>
+          <td><strong>F1</strong></td>
+          <td>两个 BOOLEAN score 的精确率 / 召回率</td>
+          <td>适合"找出 X"的场景</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <p><strong>典型实战</strong>：判断 "user-feedback 和 LLM Judge 是否一致"——用 Cohen's Kappa。如果 Kappa &lt; 0.4，<strong>说明 judge 没学懂用户偏好</strong>，需要校准。</p>
+
+    <h3>8.5 ⚠️ Matched vs All tab 的语义</h3>
+
+    <p>双 score 分析有两个 tab，含义不同：</p>
+
+    <table>
+      <thead><tr><th>Tab</th><th>显示什么</th><th>何时用</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Matched</strong></td>
+          <td>只显示两个 score 都挂在<em>同一 parent</em>的样本</td>
+          <td>有效比较（A 的 trace 上有 A1 和 A2 两个 score）</td>
+        </tr>
+        <tr>
+          <td><strong>All</strong></td>
+          <td>分别显示每个 score 的完整分布（不要求共现）</td>
+          <td>看覆盖率（A1 score 多但 A2 score 少 → A2 覆盖不全）</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 误读：</strong>把 All 当 Matched 用——会高估一致性（两者分布不一样大的情况下，All 的 Kappa 会偏低但 Matched 才是真实一致性）。
+    </div>
+
+    <h3>8.6 Dashboard 趋势实战：发现回归</h3>
+    <p>把刚才学的拼起来，发版后 5 分钟内定位回归：</p>
+    <ol>
+      <li><strong>看 score 趋势图</strong>：Analytics → score <code>helpfulness</code> → Trend Over Time → interval=5m → 看发版时间点（git sha 切换的 timestamp）</li>
+      <li><strong>下降定位</strong>：如果 mean 从 0.8 掉到 0.6 → 点那个时间点 → 看命中哪些 trace</li>
+      <li><strong>切片分析</strong>：用 metadata 组合：<code>release=&lt;new-sha&gt; AND score.helpfulness &lt; 0.5</code> → 看具体 trace</li>
+      <li><strong>点开 trace</strong>：看 Prompt 徽章 → 确认是新版 prompt → 对比旧版 → 找差异</li>
+    </ol>
+
+    <div class="task">
+      <strong>🎯 动手任务 §8（15 分钟）</strong>
+      <ol>
+        <li>跑几次 scoring_demo.py（不同 movie）攒够 ≥10 条 trace</li>
+        <li>打开 Analytics → 选 score <code>judge-helpfulness</code> → 看 mean + 分布</li>
+        <li>再加一个 score <code>rule-output-present</code> → 切到双 score 比较 → 看 Cohen's Kappa（实际会接近 1，因为 output_present 几乎都 1）</li>
+        <li>顶部搜索栏输 <code>score.judge-helpfulness &lt; 0.5</code> → 验证低分 trace 出现</li>
+        <li>（加分）双 score 对比里切到 All tab 看分布差异</li>
+      </ol>
+    </div>
+
+    <!-- ============================================================ -->
+    <h2>9. 常见坑汇总</h2>
+    <!-- ============================================================ -->
+
+    <h3>9.1 score 不出现在 UI 上（5 个 root cause 决策树）</h3>
+
+    <p>新人最常见的问题。决策树逐项排除：</p>
+
+    <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+      <defs>
+        <marker id="s3-arr4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
+        </marker>
+      </defs>
+
+      <!-- 起点 -->
+      <rect x="280" y="20" width="200" height="50" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1.5"/>
+      <text x="380" y="44" text-anchor="middle" font-size="13" font-weight="700" fill="#c0392b">score 不出现在 UI？</text>
+      <text x="380" y="60" text-anchor="middle" font-size="10" fill="#666">跑通了代码但 UI 没显示</text>
+
+      <!-- 5 个 root cause 框 -->
+      <rect x="20" y="110" width="140" height="80" rx="6" fill="#fff" stroke="#c0392b" stroke-width="1"/>
+      <text x="90" y="130" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">① name 拼错</text>
+      <text x="90" y="148" text-anchor="middle" font-size="9" fill="#666">UI Score Config</text>
+      <text x="90" y="160" text-anchor="middle" font-size="9" fill="#666">没建对应 name</text>
+      <text x="90" y="176" text-anchor="middle" font-size="9" fill="#666" font-style="italic">→ 在 UI 建对应 config</text>
+
+      <rect x="170" y="110" width="140" height="80" rx="6" fill="#fff" stroke="#c0392b" stroke-width="1"/>
+      <text x="240" y="130" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">② CATEGORICAL 漏 config</text>
+      <text x="240" y="148" text-anchor="middle" font-size="9" fill="#666">"good" 不在</text>
+      <text x="240" y="160" text-anchor="middle" font-size="9" fill="#666">config 预定义里</text>
+      <text x="240" y="176" text-anchor="middle" font-size="9" fill="#666" font-style="italic">→ 加 categories</text>
+
+      <rect x="320" y="110" width="140" height="80" rx="6" fill="#fff" stroke="#c0392b" stroke-width="1"/>
+      <text x="390" y="130" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">③ observation_id 无 trace_id</text>
+      <text x="390" y="148" text-anchor="middle" font-size="9" fill="#666">挂 observation</text>
+      <text x="390" y="160" text-anchor="middle" font-size="9" fill="#666">却没传 trace_id</text>
+      <text x="390" y="176" text-anchor="middle" font-size="9" fill="#666" font-style="italic">→ 必须同时给</text>
+
+      <rect x="470" y="110" width="140" height="80" rx="6" fill="#fff" stroke="#c0392b" stroke-width="1"/>
+      <text x="540" y="130" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">④ 跨 context 调用</text>
+      <text x="540" y="148" text-anchor="middle" font-size="9" fill="#666">用 score_current_trace</text>
+      <text x="540" y="160" text-anchor="middle" font-size="9" fill="#666">但不在 observation 内</text>
+      <text x="540" y="176" text-anchor="middle" font-size="9" fill="#666" font-style="italic">→ 改用 create_score</text>
+
+      <rect x="620" y="110" width="140" height="80" rx="6" fill="#fff" stroke="#c0392b" stroke-width="1"/>
+      <text x="690" y="130" text-anchor="middle" font-size="11" font-weight="700" fill="#c0392b">⑤ flush 已发</text>
+      <text x="690" y="148" text-anchor="middle" font-size="9" fill="#666">短脚本</text>
+      <text x="690" y="160" text-anchor="middle" font-size="9" fill="#666">进程退出后才调</text>
+      <text x="690" y="176" text-anchor="middle" font-size="9" fill="#666" font-style="italic">→ flush 前调</text>
+
+      <!-- 排查顺序提示 -->
+      <text x="90" y="220" text-anchor="middle" font-size="10" fill="#666">先检查（最常见）</text>
+      <text x="240" y="220" text-anchor="middle" font-size="10" fill="#666">检查 config</text>
+      <text x="390" y="220" text-anchor="middle" font-size="10" fill="#666">检查字段组合</text>
+      <text x="540" y="220" text-anchor="middle" font-size="10" fill="#666">检查调用位置</text>
+      <text x="690" y="220" text-anchor="middle" font-size="10" fill="#666">检查 flush 时机</text>
+
+      <!-- 流程 -->
+      <rect x="20" y="240" width="720" height="120" rx="6" fill="#faf8ef" stroke="#c9a227" stroke-width="1"/>
+      <text x="40" y="262" font-size="12" font-weight="700" fill="#8a6a17">标准排查 SOP（5 步）</text>
+      <text x="40" y="282" font-size="11" fill="#222">1. 控制台看 score 调用有没有抛异常（NameError / ValidationError）</text>
+      <text x="40" y="298" font-size="11" fill="#222">2. UI → Score Configs → 确认 name 已建；CATEGORICAL 的 categories 含实际 value</text>
+      <text x="40" y="314" font-size="11" fill="#222">3. 检查 4 个 parent 字段组合（同时给 trace_id + observation_id 时确保 observation_id 对得上）</text>
+      <text x="40" y="330" font-size="11" fill="#222">4. 检查调用是否在 @observe / CallbackHandler context 内；不在用 create_score</text>
+      <text x="40" y="346" font-size="11" fill="#222">5. 短脚本确认 flush() 在打 score 之后调用；否则 process exit 前 queue 里的 score 丢失</text>
+    </svg>
+
+    <h3>9.2 - 9.7 其他 6 类坑</h3>
+
+    <table>
+      <thead><tr><th>#</th><th>症状</th><th>根因</th><th>修法</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>9.2</td>
+          <td>同 name 的多次 score 调用后只有最后一条</td>
+          <td><code>score_id</code>（如不指定 Langfuse 不去重，但 UI 显示顺序可能乱）+ 时机</td>
+          <td>不指定 score_id 让每次都是新 score；只关心最新值时再考虑覆盖</td>
+        </tr>
+        <tr>
+          <td>9.3</td>
+          <td>judge 输出格式不稳</td>
+          <td>prompt 没强约束 / temperature 高</td>
+          <td>三 trick：低 temp + JSON 强约束 + response_format（详见 Part 2 §6.4）</td>
+        </tr>
+        <tr>
+          <td>9.4</td>
+          <td>score 关联到错对象</td>
+          <td>4 个 parent 字段填错</td>
+          <td>用 Part 2 §4.3 决策树</td>
+        </tr>
+        <tr>
+          <td>9.5</td>
+          <td>LLM judge 烧钱</td>
+          <td>sampling rate=1.0 + rule 匹配范围太宽</td>
+          <td>sampling 0.05-0.1 + filter isRootObservation=true</td>
+        </tr>
+        <tr>
+          <td>9.6</td>
+          <td>CATEGORICAL 400</td>
+          <td>value 不在 config 预定义里</td>
+          <td>UI Score Configs 加对应 category</td>
+        </tr>
+        <tr>
+          <td>9.7</td>
+          <td>v4 trace-level evaluator 弃用</td>
+          <td>旧项目挂错层级</td>
+          <td>改 observation-level + isRootObservation=true filter</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>9.8 自检清单（每个 score 写完跑一遍）</h3>
+
+    <pre><code># Score 写入前的 6 项 checklist：
+# 1. name 已在 UI Score Configs 建好？
+# 2. CATEGORICAL 的 value 在 categories 里？
+# 3. 4 个 parent 字段组合正确（挂 observation 必须给 trace_id + observation_id）？
+# 4. 在 observation context 内？（用 score_current_*）或显式传 trace_id（用 create_score）？
+# 5. flush() 在 score 调用之后？
+# 6. 已绑定的 prompt（如有）传的是 PromptClient 对象不是字符串？</code></pre>
+
+    <!-- ============================================================ -->
+    <h2>10. 一句话总结 + 下一节预告</h2>
+    <!-- ========================================================= === -->
+
+    <h3>10.1 三节回顾</h3>
+
+    <table>
+      <thead><tr><th>节</th><th>核心</th><th>一句话</th></tr></thead>
+      <tbody>
+        <tr>
+          <td><strong>Part 1</strong></td>
+          <td>数据模型 + 概念</td>
+          <td>Score = 4 种 data_type × 4 个 parent × 3 种 Evaluator 实现</td>
+        </tr>
+        <tr>
+          <td><strong>Part 2</strong></td>
+          <td>三种实现</td>
+          <td>Code Evaluator 做确定性检查，LLM Judge 做语义判断；生产走 UI 注册 + Rule filter</td>
+        </tr>
+        <tr>
+          <td><strong>Part 3</strong></td>
+          <td>人工路径 + 查分 + 排雷</td>
+          <td>Annotation Queue 内部精标 / User Feedback 终端 👍👎 / Analytics 验证一致性</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <h3>10.2 下一节预告：0006 Dataset + Experiment</h3>
+    <p>把 Part 2 的 inline evaluator + 固定样本 → 升格为离线 experiment：</p>
+    <ul>
+      <li>建一个 Dataset（含 50-100 条样本）</li>
+      <li>用 <code>dataset.run_experiment(...)</code> 跑两个 prompt 版本</li>
+      <li>对比 v1 vs v2 的 score 差异 + 找出哪条 prompt 改善 / 退化</li>
+      <li>接 CI：分数跌破阈值时 <code>RegressionError</code> → 阻断部署</li>
+    </ul>
+
+    <p>这一套是 mission 里"我能跑出两个 prompt 版本的对比结果"的最终落地。</p>
+
+    <footer class="lesson-footer">
+      上一节：<a href="0005-02-scoring-evaluators.html">Lesson 0005 · Part 2 · 三种 Evaluator 实现</a><br>
+      下一步：<a href="0006-dataset-and-experiment.html">Lesson 0006 · Dataset + Experiment（离线评估）→</a><br>
+      本节参考：<a href="https://langfuse.com/docs/evaluation/evaluation-methods/annotation-queues">Annotation Queues</a> · <a href="https://langfuse.com/docs/evaluation/scores/score-analytics">Score Analytics</a><br>
+      相关：<a href="../reference/glossary.html">术语表</a> · <a href="metadata-cheatsheet.html">字段表</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

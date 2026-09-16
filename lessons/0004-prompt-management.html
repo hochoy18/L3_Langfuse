@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lesson 0004 · Prompt 搬出代码：版本管理与 trace 关联</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="0004-prompt-management.html" class="active">0004 · Prompt 管理</a></li>
+      <li><a href="0005-01-scoring-fundamentals.html">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html">0005 · 评分(3/3)</a></li>
+      <li class="sep">·</li>
+      <li><a href="../reference/glossary.html">术语表</a></li>
+      <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../reference/prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="../reference/prompt-code-integration.html">代码接入</a></li>
+      <li><a href="../reference/prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="../reference/prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+      <li><a href="../RESOURCES.md">资源</a></li>
+      <li><a href="../NOTES.md">笔记</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">LESSON 0004 · PROMPT MANAGEMENT</div>
+      <h1>把 Prompt 搬出代码，用 Langfuse 做版本管理</h1>
+      <div class="meta">预计 30 分钟 · 难度 ★★★☆☆ · 产出：prompt 在 UI 里改一行代码不用动；trace 上自动出现 prompt 徽章</div>
+    </header>
+
+    <div class="objective">
+      <strong>本节目标</strong><br>
+      把硬编码在 Python 字符串里的 system prompt 搬到 Langfuse 的 Prompt Management。改 prompt 不再需要发版；UI 上能看到哪条 trace 用了哪个版本；回滚一行 label。
+    </div>
+
+    <h2>1. 为什么 prompt 要搬出代码</h2>
+    <p>上一节 trace 树有了，但 prompt 还是写死在 <code>system = "你是一个..."</code> 里——这意味着每次调 prompt 都要发版一次代码。先看两者差异：</p>
+
+    <table>
+      <thead><tr><th>维度</th><th>硬编码在代码里</th><th>搬到 Langfuse</th></tr></thead>
+      <tbody>
+        <tr><td>改一个措辞</td><td>改代码 → 走 PR → CI → 部署</td><td>UI 改 → 下一个请求就用上</td></tr>
+        <tr><td>对比新旧 prompt</td><td>手动 <code>git diff</code></td><td>UI 里逐版本 diff，自带评分对比</td></tr>
+        <tr><td>回滚</td><td>git revert + 重部署</td><td>把 <code>production</code> label 切回旧版本</td></tr>
+        <tr><td>trace 关联</td><td>只能从 input 里反推用的是哪版</td><td>UI 上每条 trace 带 prompt 徽章，链回具体版本</td></tr>
+        <tr><td>非工程师协作</td><td>提 PR 给工程师改</td><td>PM 自己登录 UI 改</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>直觉：</strong>Prompt Management 解决的是 <em>"prompt 是产品的一部分，而不只是代码的一部分"</em>。它本来就不是字符串常量——它是有版本、需要对比、能回滚的<strong>资产</strong>。
+    </div>
+
+    <h2>2. 三个核心概念</h2>
+
+    <table>
+      <thead><tr><th>概念</th><th>是什么</th><th>类比</th></tr></thead>
+      <tbody>
+        <tr><td><strong>Prompt</strong></td><td>一个<strong>具名</strong>的 prompt 对象（如 <code>movie-critic</code>）</td><td>Git 仓库</td></tr>
+        <tr><td><strong>Version</strong></td><td>Prompt 的一次发布。整数，自增</td><td>Git commit</td></tr>
+        <tr><td><strong>Label</strong></td><td>贴在某个 Version 上的可读指针（<code>production</code> / <code>staging</code> / <code>latest</code>）</td><td>Git branch / tag</td></tr>
+      </tbody>
+    </table>
+
+    <p>关键关系：</p>
+    <pre><code>Prompt "movie-critic"
+ ├─ v1  labels=["production", "latest"]   ← 线上跑这版
+ ├─ v2  labels=["latest"]                 ← 刚编辑，没上线
+ └─ v3  labels=["staging"]                ← 准备 A/B</code></pre>
+
+    <p>SDK 默认 <code>get_prompt(name)</code> 拿的是带 <code>production</code> label 的版本。如果没人打 production，会报错（详见 §7）。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong><code>latest</code> 是 Langfuse <strong>自动维护</strong>的 label，永远指向最新版本。生产环境 <strong>永远不要 fetch by latest</strong>——那等于裸奔发版，没有 label 这层开关保护。
+    </div>
+
+    <h2>3. 第一步：创建你的第一个 prompt</h2>
+    <p>两种方式——先用 UI 看到形状，再用 SDK 写代码。</p>
+
+    <h3>方式 A：UI 创建（最快）</h3>
+    <ol>
+      <li>浏览器 <code>localhost:3000</code></li>
+      <li>左侧 <em>Prompts</em> → <em>+ New Prompt</em></li>
+      <li>填三栏：
+        <pre><code>Name:       movie-critic
+Type:       Text
+Prompt:     As a {{criticlevel}} movie critic, do you like {{movie}}?
+Labels:     production
+Commit msg: initial version</code></pre>
+      </li>
+      <li>Save</li>
+    </ol>
+
+    <h3>方式 B：SDK 创建（可放进 CI / 一次性脚本）</h3>
+
+    <pre><code># seed_prompt.py  —— 一次性脚本，跑完即可删
+from langfuse import get_client
+
+lf = get_client()
+lf.create_prompt(
+    name="movie-critic",
+    type="text",
+    prompt="As a {{criticlevel}} movie critic, do you like {{movie}}?",
+    labels=["production"],
+    config={"temperature": 0.7},          # 任何额外参数，可放模型/温度
+    commit_message="initial version",
+)
+print("created, version =", lf.get_prompt("movie-critic").version)</code></pre>
+
+    <p><code>create_prompt</code> 的行为：同名 prompt 再次调用会<strong>创建新版本</strong>（不是覆盖）。Labels 是贴在那个<strong>新版本</strong>上的，旧的带 <code>production</code> 标签的版本会失去这个 label（详见 §4）。</p>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>UI 和 SDK 都能创建 prompt，但<strong>修改已经发布的版本不行</strong>。一旦某个版本被 trace 引用，它就是历史——只能发新版。这也意味着 <code>create_prompt</code> 默认每次都新建版本，<strong>不会</strong>就地改。
+    </div>
+
+    <h2>4. 第二步：在代码里拿 prompt</h2>
+
+    <h3>4.1 默认拿法（拿 production）</h3>
+    <pre><code>from langfuse import get_client
+
+lf = get_client()
+prompt = lf.get_prompt("movie-critic")        # 默认 label="production"
+print(prompt.name, prompt.version, prompt.labels)
+# movie-critic 1 ['production', 'latest']
+
+print(prompt.prompt)
+# "As a {{criticlevel}} movie critic, do you like {{movie}}?"</code></pre>
+
+    <h3>4.2 三种获取维度</h3>
+    <table>
+      <thead><tr><th>调用</th><th>拿什么</th><th>何时用</th></tr></thead>
+      <tbody>
+        <tr><td><code>get_prompt(name)</code></td><td>带 <code>production</code> label 的版本</td><td>线上代码（默认安全）</td></tr>
+        <tr><td><code>get_prompt(name, label="staging")</code></td><td>带 <code>staging</code> label 的版本</td><td>预发环境 / 灰度对比</td></tr>
+        <tr><td><code>get_prompt(name, label="latest")</code></td><td>Langfuse 自动维护的最新版本</td><td>预发看新效果（<strong>不要上 prod</strong>）</td></tr>
+        <tr><td><code>get_prompt(name, version=3)</code></td><td>指定版本号</td><td>回归测试 / 复现某条历史 trace</td></tr>
+      </tbody>
+    </table>
+
+    <h3>4.3 返回对象的字段</h3>
+    <pre><code>p = lf.get_prompt("movie-critic")
+
+p.name            # str: "movie-critic"
+p.version         # int: 1
+p.labels          # list[str]: ["production", "latest"]
+p.config          # dict: {"temperature": 0.7}
+p.tags            # list[str]: []
+p.commit_message  # str | None: "initial version"
+p.is_fallback     # bool: False（True = 本地 fallback 顶上来的，见 §7）
+p.prompt          # str: "As a {{criticlevel}} movie critic, do you like {{movie}}?"</code></pre>
+
+    <div class="callout">
+      <strong>说明：</strong><code>p.config</code> 是创建时传的自由 dict，常用来塞模型名、温度这种"和这个 prompt 绑死的参数"——代码里就不用到处写散落的 <code>temperature=...</code> 了。
+    </div>
+
+    <h2>5. 第三步：compile 替换变量</h2>
+    <p><code>{{criticlevel}}</code> 这种 <code>{{var}}</code> 占位符是 Langfuse 自家语法（不是 Python f-string，也不是 Jinja）。替换用 <code>.compile(**kwargs)</code>：</p>
+
+    <pre><code>p = lf.get_prompt("movie-critic")
+msg = p.compile(criticlevel="expert", movie="Dune 2")
+print(msg)
+# "As an expert movie critic, do you like Dune 2?"</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong>变量名必须严格匹配——<code>{{criticlevel}}</code> 传 <code>critical_level</code> 不会报错，但占位符原样保留，会拼出 <code>"As an {{criticlevel}} movie critic..."</code>。这种 bug 在 prompt 长的时候很难看出来。
+    </div>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑（更隐蔽）：</strong>如果变量值里碰巧含 <code>{{xxx}}</code>，<code>.compile()</code> 不会二次转义（不是 Jinja）。所以传入的内容一定要你自己 sanitize。
+    </div>
+
+    <h2>6. 第四步：把 prompt 接到 LLM 调用上（杀手功能）</h2>
+    <p>拿到 prompt + compile 之后，最直接的方式就是拼到 messages 里调 LLM。但 Langfuse 真正的杀手锏是<strong>在 trace 上自动显示 prompt 徽章</strong>——告诉你这条 trace 用了哪个版本。这个关联需要显式声明一次：</p>
+
+    <pre><code>from langfuse import get_client, observe
+from langchain_openai import ChatOpenAI
+import os
+
+lf = get_client()
+llm = ChatOpenAI(
+    model=os.getenv("MODEL_NAME", "gpt-4o-mini"),
+    api_key=os.getenv("MINIMAX_API_KEY"),
+    base_url=os.getenv("MINIMAX_BASE_URL"),
+)
+
+@observe(as_type="generation", name="ask-critic")
+def ask_critic(criticlevel: str, movie: str) -> str:
+    prompt = lf.get_prompt("movie-critic")          # 拿带 production 的版本
+    compiled = prompt.compile(criticlevel=criticlevel, movie=movie)
+
+    # 关键：把 PromptClient 对象传给当前 generation——这一步让 UI 上出现
+    # Prompt 徽章并链接到具体版本。如果只传字符串则不会建链接。
+    lf.update_current_generation(
+        prompt=prompt,
+        model=prompt.config.get("model", "gpt-4o-mini"),
+    )
+
+    resp = llm.invoke([
+        {"role": "system", "content": compiled},
+        {"role": "user",   "content": f"评论一下《{movie}》"},
+    ])
+    # 顺便记 output 和 token
+    lf.update_current_generation(
+        usage_details={
+            "input_tokens":  resp.usage_metadata["input_tokens"],
+            "output_tokens": resp.usage_metadata["output_tokens"],
+            "total_tokens":  resp.usage_metadata["total_tokens"],
+        },
+    )
+    return resp.content</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong><code>update_current_generation(prompt=...)</code> 要传 <strong>PromptClient 对象</strong>（<code>p</code>），不是 compile 后的字符串（<code>compiled</code>）。传字符串只能让 UI 里 input 字段有内容，<strong>不会建 prompt 版本链接</strong>。这是新手最容易踩的坑——看到 input 有 prompt 文字以为关联好了，结果徽章没出来。
+    </div>
+
+    <p>跑完后 UI 上这条 Generation 节点会显示一个 <strong>"Prompt"</strong> 徽章，点击直接跳到 <code>movie-critic v1</code>，能 diff 到其它版本——这就是版本化 prompt 真正的价值。</p>
+
+    <h3>在 LangChain 里更顺手的写法</h3>
+    <p>如果整个 agent 都用 LangChain，更简洁的方式是用 <code>get_langchain_prompt()</code> 把 Langfuse prompt 转成 LangChain 的 <code>ChatPromptTemplate</code>，再交给 <code>ChatPromptTemplate.from_template</code>。CallbackHandler 会自动埋点，prompt 关联也会自动建立：</p>
+
+    <pre><code>from langchain_core.prompts import ChatPromptTemplate
+
+p = lf.get_prompt("movie-critic-chat", type="chat")        # 注意 type
+chat_prompt = ChatPromptTemplate.from_template(p.get_langchain_prompt())
+
+# 正常用
+chain = chat_prompt | llm
+result = chain.invoke({"criticlevel": "expert", "movie": "Dune 2"})</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong><code>get_langchain_prompt()</code> 把 <code>{{var}}</code> 转成 LangChain 的 <code>{var}</code> 语法。两者都接受，但你<strong>不能再用 <code>.compile(var=...)</code></strong>，要用 LangChain 的 <code>chain.invoke({...})</code>，否则会原样保留 LangChain 占位符。
+    </div>
+
+    <h2>7. 缓存、fallback、guaranteed availability</h2>
+    <p>线上最关心的事：Langfuse 挂了怎么办？</p>
+
+    <table>
+      <thead><tr><th>机制</th><th>怎么生效</th><th>行为</th></tr></thead>
+      <tbody>
+        <tr><td><strong>客户端缓存（默认开启）</strong></td><td>SDK 第一次拉 prompt 后缓存 60s</td><td>缓存期内 Langfuse 挂了也照常用</td></tr>
+        <tr><td><strong>自定义 TTL</strong></td><td><code>get_prompt(name, cache_ttl_seconds=300)</code></td><td>调到 5 分钟甚至更长</td></tr>
+        <tr><td><strong>关闭缓存</strong></td><td><code>cache_ttl_seconds=0</code></td><td>每次请求都打 Langfuse（不推荐）</td></tr>
+        <tr><td><strong>fallback 参数</strong></td><td><code>get_prompt(name, fallback="...")</code></td><td>拉取失败时返回本地字符串；<code>is_fallback=True</code></td></tr>
+        <tr><td><strong>guaranteed availability</strong></td><td>CLI 工具 <code>langfuse prompt fetch</code> 把 prompt 拉成离线文件</td><td>本地有副本，Langfuse 挂完全无感</td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># 推荐生产配置：5 分钟缓存 + fallback
+prompt = lf.get_prompt(
+    "movie-critic",
+    cache_ttl_seconds=300,
+    fallback="As a {{criticlevel}} movie critic, do you like {{movie}}?",
+)
+if prompt.is_fallback:
+    # 打日志告警——已经退到 fallback 了
+    print("WARN: using fallback prompt")</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ 坑：</strong><code>is_fallback=True</code> 时<strong>不会在 UI 上建立 prompt 链接</strong>。这意味着 fallback 路径跑出来的 trace，prompt 徽章是空的——这是 feature 不是 bug，因为它本来就是"没真的连上 Langfuse"。
+    </div>
+
+    <h2>8. 完整 demo：text + chat + 版本切换</h2>
+    <p>完整可运行 demo 在 <a href="../src/apps/fuse/prompt_demo.py"><code>src/apps/fuse/prompt_demo.py</code></a>。它做三件事：</p>
+
+    <ol>
+      <li>如果 <code>movie-critic</code> prompt 不存在就创建一个</li>
+      <li>再创建一个新版本（把 prompt 措辞改得更"温和"），但<strong>不打 production label</strong>——保持旧版本线上</li>
+      <li>调一次 LLM，跑出 trace，回 UI 看 prompt 徽章指向 v1</li>
+    </ol>
+
+    <pre><code># 第一次跑：会创建 v1
+uv run python src/apps/fuse/prompt_demo.py
+
+# 改 prompt 内容再跑：会创建 v2（线上仍跑 v1）
+# 登录 UI 把 v2 的 label 加上 production、v1 摘掉 → 切到 v2
+# 再跑一次：trace 徽章指向 v2</code></pre>
+
+    <h3>核心代码骨架</h3>
+    <pre><code>"""Lesson 0004 · Prompt Management demo."""
+import os
+from langfuse import get_client, observe
+from langchain_openai import ChatOpenAI
+
+PROMPT_NAME = "movie-critic"
+
+llm = ChatOpenAI(
+    model="MiniMax-M3",
+    api_key=os.getenv("MINIMAX_API_KEY"),
+    base_url=os.getenv("MINIMAX_BASE_URL"),
+    temperature=0.7,
+)
+
+
+def ensure_prompt_v1() -> int:
+    """首次跑时创建 v1；后续跑时跳过。"""
+    lf = get_client()
+    try:
+        v = lf.get_prompt(PROMPT_NAME, label="production").version
+        return v
+    except Exception:
+        lf.create_prompt(
+            name=PROMPT_NAME,
+            type="text",
+            prompt=(
+                "As a {{criticlevel}} movie critic, "
+                "give a one-line take on {{movie}}."
+            ),
+            labels=["production"],
+            config={"temperature": 0.7, "model": "MiniMax-M3"},
+            commit_message="initial version",
+        )
+        return lf.get_prompt(PROMPT_NAME).version
+
+
+@observe(as_type="generation", name="ask-critic")
+def ask(criticlevel: str, movie: str) -> str:
+    lf = get_client()
+    p = lf.get_prompt(PROMPT_NAME)                  # 拿 production
+
+    compiled = p.compile(criticlevel=criticlevel, movie=movie)
+
+    # 把 prompt 关联到当前 trace（核心三行）
+    lf.update_current_generation(
+        prompt=p,                                  # ← 注意：传 PromptClient 对象，不是字符串
+        model=p.config.get("model", "MiniMax-M3"),
+    )
+
+    resp = llm.invoke([
+        {"role": "system", "content": compiled},
+        {"role": "user",   "content": f"评论一下《{movie}》"},
+    ])
+    lf.update_current_generation(
+        usage={
+            "input":  resp.usage_metadata.get("input_tokens", 0),
+            "output": resp.usage_metadata.get("output_tokens", 0),
+            "total":  resp.usage_metadata.get("total_tokens", 0),
+        },
+    )
+    return resp.content
+
+
+def main() -> None:
+    v = ensure_prompt_v1()
+    print(f">>> current production version = {v}")
+    print(f">>> {ask('harsh', 'Dune 2')}")
+    print(f">>> {ask('harsh', 'Oppenheimer')}")
+    get_client().flush()
+
+
+if __name__ == "__main__":
+    main()</code></pre>
+
+    <h2>9. Text Prompt vs Chat Prompt</h2>
+    <p>Langfuse 有两种 prompt 类型，<strong>创建后不能改类型</strong>——只能新建一个不同名或带版本号的 prompt。</p>
+
+    <table>
+      <thead><tr><th>维度</th><th>Text Prompt</th><th>Chat Prompt</th></tr></thead>
+      <tbody>
+        <tr><td>形态</td><td>单字符串 <code>"As a {{role}}..."</code></td><td>messages 列表 <code>[{role, content}, ...]</code></td></tr>
+        <tr><td>何时用</td><td>单轮补全 / FIM 类任务</td><td>多轮 / system+user 结构化</td></tr>
+        <tr><td>compile 返回</td><td>str</td><td>list[dict]（可以直接丢给 chat completion）</td></tr>
+        <tr><td>创建示例</td><td><code>type="text", prompt="..."</code></td><td><code>type="chat", prompt=[{...}, {...}]</code></td></tr>
+      </tbody>
+    </table>
+
+    <pre><code># Chat prompt 创建
+lf.create_prompt(
+    name="movie-critic-chat",
+    type="chat",
+    prompt=[
+        {"role": "system", "content": "你是 {{criticlevel}} 影评人"},
+        {"role": "user",   "content": "一句话评价《{{movie}}》"},
+    ],
+    labels=["production"],
+    commit_message="chat variant",
+)
+
+# 拉取 + compile + 直接喂给 LLM
+p = lf.get_prompt("movie-critic-chat", type="chat")
+messages = p.compile(criticlevel="harsh", movie="Dune 2")
+# messages == [
+#   {"role": "system", "content": "你是 harsh 影评人"},
+#   {"role": "user",   "content": "一句话评价《Dune 2》"},
+# ]
+resp = llm.invoke(messages)</code></pre>
+
+    <h2>10. 常见报错 & 排查</h2>
+    <table>
+      <thead><tr><th>症状</th><th>原因</th><th>排查</th></tr></thead>
+      <tbody>
+        <tr><td><code>PromptNotFoundError</code></td><td>prompt 不存在或没打 production label</td><td>先去 UI 看 Labels 一栏有没有 <code>production</code></td></tr>
+        <tr><td>UI 看不到 prompt 徽章</td><td>没在 generation 里调 <code>update_current_generation(prompt=...)</code></td><td>确认 <code>@observe(as_type="generation")</code> 包裹了 LLM 调用那一段</td></tr>
+        <tr><td>变量没替换，原样出现在 prompt 里</td><td>变量名拼错 / 用了 <code>get_langchain_prompt()</code> 又想 <code>.compile()</code></td><td>检查占位符和传参 key 是否完全一致</td></tr>
+        <tr><td><code>is_fallback=True</code>，没有 trace 链接</td><td>拉取失败 + 缓存空</td><td>查 Langfuse web 日志；fallback 是设计如此</td></tr>
+        <tr><td>UI 上 version 一直不变</td><td>create_prompt 没真生效（同名但 label 没动）</td><td>去 UI 看版本列表；labels 是按版本走的</td></tr>
+      </tbody>
+    </table>
+
+    <div class="task">
+      <strong>🎯 动手任务（25 分钟）</strong>
+      <ol>
+        <li>跑 <code>src/apps/fuse/prompt_demo.py</code> 一次，确认 UI 上 <code>movie-critic v1</code> 的 trace 出现了，带 prompt 徽章</li>
+        <li>把 prompt 字符串改一个词（比如 <code>harsh → brutal</code>），再跑一次。UI 里现在有两个版本：v1（production）、v2（无 label）。trace 徽章仍指向 v1</li>
+        <li>登录 UI，把 v2 加上 <code>production</code> label、把 v1 摘掉。再跑一次。trace 徽章现在指向 v2</li>
+        <li>故意把 <code>compile()</code> 的参数名写错（<code>criticlevel</code> 写成 <code>critical_level</code>），观察 UI 里 prompt 是否原样保留了占位符——是的，这就是为什么要做 prompt 校验</li>
+        <li>（加分）创建一个 <strong>chat prompt</strong> <code>movie-critic-chat</code>，把 demo 改成 chat 类型，跑通后观察 <code>messages</code> 列表在 UI 里如何显示</li>
+      </ol>
+    </div>
+
+    <h2>11. 一句话总结</h2>
+    <p><strong><code>get_prompt(name)</code> 拿生产版 + <code>compile(**kwargs)</code> 替换变量 + <code>update_current_generation(prompt=...)</code> 把 prompt 钉到 trace 上。</strong></p>
+    <p>下一节我们解决"线上回答到底好不好"——给 trace 打分（在线 score + LLM-as-a-Judge）。</p>
+
+    <footer class="lesson-footer">
+      下一步：<a href="0005-scoring-and-llm-judge.html">Lesson 0005 · 给 Trace 打分（在线 Score + LLM-as-a-Judge）→</a><br>
+      引用资源：<a href="../RESOURCES.md">RESOURCES.md · Prompt Management</a> · <a href="../reference/glossary.html">Glossary · Prompt / Version / Label</a><br>
+      配套参考页：<a href="../reference/prompt-data-model.html">数据模型</a> · <a href="../reference/prompt-code-integration.html">代码接入</a> · <a href="../reference/prompt-operations-playbook.html">运维 SOP</a> · <a href="../reference/prompt-storage-internals.html">存储内部</a> · <a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a><br>
+      踩坑归档：<a href="../learning-records/0007-prompt-management-three-pitfalls.md">learning-record 0007</a><br>
+      补充阅读：<a href="https://langfuse.com/docs/prompt-management/get-started">Langfuse Docs · Prompt Management</a> · <a href="https://langfuse.com/docs/prompt-management/features/link-to-traces">Link Prompts to Traces</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

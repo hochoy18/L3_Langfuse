@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 运维 SOP · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html" class="active">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · PROMPT OPS PLAYBOOK</div>
+      <h1>Prompt 运维 SOP</h1>
+      <div class="meta">6 个核心场景 + 5 步部署 + 缓存策略 + 回滚机制。直接抄就能用。</div>
+    </header>
+
+    <div class="objective">
+      <strong>本页目标</strong><br>
+      不解释原理，只讲步骤：日常改 prompt、A/B、回滚、废弃时该走哪套流程。每一步都配可直接复制的命令或 UI 操作。
+    </div>
+
+    <h2>1. 6 个核心场景</h2>
+
+    <h3>场景 A：新建一个 prompt（首次）</h3>
+    <p><strong>UI 路径</strong>：<code>Prompts → + New Prompt → 填 5 栏 → Save</code></p>
+
+    <table>
+      <thead><tr><th>栏</th><th>填什么</th><th>例子</th></tr></thead>
+      <tbody>
+        <tr><td>Name</td><td>唯一名（小写连字符）</td><td><code>checkout-recommender</code></td></tr>
+        <tr><td>Type</td><td>Text 或 Chat</td><td>Text（单字符串）</td></tr>
+        <tr><td>Prompt</td><td>模板字符串，用 <code>{{var}}</code></td><td><code>Recommend products for {{user_segment}}...</code></td></tr>
+        <tr><td>Labels</td><td>默认勾 production</td><td><code>["production"]</code></td></tr>
+        <tr><td>Commit msg</td><td>这次发布做了什么</td><td><code>initial version, A/B test ready</code></td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>SDK 等价</strong>：</p>
+    <pre><code>lf.create_prompt(
+    name="checkout-recommender",
+    type="text",
+    prompt="Recommend products for {{user_segment}}: ",
+    labels=["production"],
+    config={"model": "gpt-4o", "temperature": 0.5},
+    commit_message="initial version",
+)</code></pre>
+
+    <div class="callout warn">
+      <strong>⚠️ <code>labels=["production"]</code> 会让旧 production 版本失去这个 label</strong>——这是默认行为，新版本生效、旧版本下线。
+    </div>
+
+    <h3>场景 B：改一个 prompt（线上已有，要换）</h3>
+    <p><strong>最稳的做法（4 步）</strong>：</p>
+    <ol>
+      <li>UI: <code>Prompts → checkout-recommender → Edit</code> → 改 prompt 文字 → Save（自动创建 v2）→ <strong>Labels 不勾 production</strong>（保持 v1 在线）</li>
+      <li>UI: 给 v2 加 <code>staging</code> label（可选，看你要不要预发）</li>
+      <li>改代码：在配置里切到 staging 验证 <code>prompt = lf.get_prompt("checkout-recommender", label="staging")</code></li>
+      <li>验证 OK 后：UI 把 v2 的 labels 加上 production。v1 的 production 会自动被夺走。5 秒 + 缓存 TTL 后所有线上请求都用 v2</li>
+    </ol>
+
+    <div class="callout warn">
+      <strong>⚠️ 不要直接 create_prompt 时打 production</strong>。否则没法"先看一下效果再决定"——线上立刻全切，改坏了只能用 UI 回滚。
+    </div>
+
+    <h3>场景 C：对比两个版本</h3>
+    <p><strong>UI 路径</strong>：<code>Prompts → checkout-recommender → 选 v1 / v2 → Diff 标签</code></p>
+    <p><strong>SDK 跑对比</strong>：</p>
+    <pre><code>v1 = lf.get_prompt("checkout-recommender", version=1)
+v2 = lf.get_prompt("checkout-recommender", version=2)
+
+# 跑同一个 input，看两个版本的输出
+print("v1:", llm.invoke([{"role": "user", "content": v1.compile(user_segment="new_visitor")}]))
+print("v2:", llm.invoke([{"role": "user", "content": v2.compile(user_segment="new_visitor")}]))</code></pre>
+
+    <h3>场景 D：A/B 测试</h3>
+    <p><strong>核心模式</strong>：同一 prompt 名 + 多个版本 + 不同 label，运行时按比例分流。</p>
+    <pre><code>import hashlib
+from langfuse import get_client
+
+lf = get_client()
+A = lf.get_prompt("checkout-recommender", label="production")
+B = lf.get_prompt("checkout-recommender", label="experiment-b")
+
+def get_prompt_ab(user_id: str):
+    bucket = int(hashlib.md5(user_id.encode()).hexdigest(), 16) % 100
+    return A if bucket < 50 else B
+
+# 调用时
+p = get_prompt_ab(user_id="u-9f3a")
+compiled = p.compile(user_segment="new_visitor")
+resp = llm.invoke(...)
+
+# trace 上标记 bucket，方便后续分析
+lf.update_current_generation(
+    prompt=p,
+    metadata={"ab_bucket": "A" if p.version == A.version else "B"},
+)</code></pre>
+
+    <h3>场景 E：回滚</h3>
+    <p><strong>最快的回滚（30 秒）</strong>：</p>
+    <ol>
+      <li>UI: <code>Prompts → checkout-recommender</code></li>
+      <li>找到上一个稳定版本（看 <code>commit_message</code> 找最近的 known-good）</li>
+      <li>把 <code>production</code> label 切到那个版本</li>
+      <li>5 秒 + 缓存 TTL 后所有线上请求回到旧版</li>
+    </ol>
+
+    <div class="callout">
+      <strong>关键：commit_message 要写人话。</strong>
+      <ul>
+        <li>❌ <code>update prompt</code></li>
+        <li>✅ <code>v3: add safety disclaimer, before that A/B test showed +12% conversion</code></li>
+      </ul>
+      回滚时靠这个知道回到哪版。
+    </div>
+
+    <h3>场景 F：废弃 prompt（清理）</h3>
+    <p>UI: <code>Prompts → 选 prompt → Archive</code></p>
+    <p>Archive 不删数据，只是不在 UI 默认列表显示。已经发出的 trace 仍然引用那个 prompt 版本——这是好事，可以回看历史。</p>
+
+    <h2>2. 部署 5 步（官方原文）</h2>
+
+    <pre><code>1. Create and test   创建新版本（自动获 latest）
+2. Validate — 在 dev / playground 验证
+3. Deploy — UI 把 production 切到新版本
+4. Monitor — 下次 fetch 生效（含缓存延迟）
+5. Rollback if needed — 切回上一版</code></pre>
+
+    <p><strong>代码侧不用改任何东西</strong>——因为代码引用 label 而不是 version。</p>
+
+    <h2>3. 真实时间线（含缓存延迟）</h2>
+
+    <pre><code>T+0s  UI: create new version v3（labels=["latest"]）
+       v2 仍带 production，v3 只带 latest
+T+5s   测试用 staging 环境拉 v3 验证
+T+30s  UI: 给 v3 加上 production label
+       v2 失去 production
+       v3 现在 labels=["production", "latest"]
+T+30s  ← 这一刻线上还没切换！（缓存未过期）
+T+90s  默认 TTL（60s）过后，所有新请求拿到 v3
+T+90s+ 监控指标开始反映 v3
+T+∞   如果 v3 表现差：UI 把 production 切回 v2 → 60s 后生效</code></pre>
+
+    <h2>4. Caching 配置矩阵</h2>
+
+    <table>
+      <thead><tr><th>场景</th><th>配置</th></tr></thead>
+      <tbody>
+        <tr><td>默认（推荐生产）</td><td><code>get_prompt(name)</code>（隐式 60s）</td></tr>
+        <tr><td>长 TTL（高可用优先）</td><td><code>get_prompt(name, cache_ttl_seconds=300)</code></td></tr>
+        <tr><td>立即生效（紧急修复）</td><td><code>get_prompt(name, cache_ttl_seconds=0)</code></td></tr>
+        <tr><td>Langfuse 挂了也能跑</td><td><code>get_prompt(name, fallback="...")</code></td></tr>
+        <tr><td>完全离线可用</td><td>CLI: <code>langfuse prompt fetch</code> 拉成本地文件</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ fallback 不建立 link</strong>——这是设计如此，不是 bug。fallback 等于没真连上 Langfuse，假装 link 会误导调试。
+    </div>
+
+    <h2>5. 团队协作的角色分工</h2>
+
+    <table>
+      <thead><tr><th>角色</th><th>改 prompt 路径</th><th>不能做的事</th></tr></thead>
+      <tbody>
+        <tr><td>PM / 业务方</td><td>UI 直接改 + 加 commit_message</td><td>不能直接动 production label（要 engineer 审批）</td></tr>
+        <tr><td>算法 / engineer</td><td>UI 改 → 自加 staging → 跑 eval → 切 production</td><td>—</td></tr>
+        <tr><td>新人</td><td>只读，看 UI 历史</td><td>不能动任何 prompt</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Protected Labels</strong>（Enterprise）可以把 <code>production</code> 设为受保护——viewer / member 不能改，只有 admin / owner 能动。</p>
+
+    <h2>6. 跟代码同步的双轨问题</h2>
+
+    <table>
+      <thead><tr><th>场景</th><th>后果</th><th>修法</th></tr></thead>
+      <tbody>
+        <tr><td>prompt 加了新变量 <code>{{foo}}</code>，代码没传</td><td>UI 里 prompt 是 <code>{{foo}}</code> 原样保留</td><td>unit test 校验 <code>compile()</code> 后没有 <code>{{</code> 残留</td></tr>
+        <tr><td>代码加了新参数 <code>foo="bar"</code>，prompt 没用到</td><td>多余参数不影响（无害）</td><td>给 prompt 加注释说明哪些变量是必填</td></tr>
+        <tr><td>旧代码引用了已删除的 prompt 名</td><td>运行时 <code>PromptNotFoundError</code></td><td>灰度发布前跑 canary</td></tr>
+      </tbody>
+    </table>
+
+    <footer class="lesson-footer">
+      相关：<a href="prompt-data-model.html">数据模型</a> · <a href="prompt-code-integration.html">代码接入</a> · <a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a><br>
+      主课：<a href="../lessons/0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>

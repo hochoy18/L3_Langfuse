@@ -1,0 +1,20 @@
+[project]
+name = "langfuse-sys"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langchain>=1.4.0",
+    "langchain-core>=1.6.3",
+    "langchain-openai>=1.6.2",
+    "langfuse>=3.0",
+    "langgraph>=1.2.11",
+    "openai>=1.0",
+    "python-dotenv>=1.0",
+    "pydantic>=2.7",
+    "psycopg[binary]>=3.3.5",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.7",
+]

@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prompt 存储内部 · Langfuse</title>
+<link rel="stylesheet" href="../assets/styles.css">
+</head>
+<body>
+<nav class="top-nav">
+  <div class="top-nav-inner">
+    <a href="../README.md" class="brand"><span class="brand-mark">▣</span>Langfuse · L3</a>
+    <ul class="top-nav-links">
+      <li><a href="../lessons/0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
+      <li><a href="../lessons/0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
+      <li><a href="../lessons/0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
+      <li><a href="../lessons/0004-prompt-management.html">0004 · Prompt 管理</a></li>
+      <li class="sep">·</li>
+      <li><a href="glossary.html">术语表</a></li>
+      <li><a href="metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="prompt-code-integration.html">代码接入</a></li>
+      <li><a href="prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="prompt-storage-internals.html" class="active">存储内部</a></li>
+      <li><a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
+    </ul>
+  </div>
+</nav>
+
+<div class="layout">
+  <aside class="toc-sidebar">
+    <div class="toc-eyebrow">本节目录</div>
+    <ul id="toc-list"></ul>
+  </aside>
+
+  <main class="content">
+    <header class="lesson-header">
+      <div class="eyebrow">REFERENCE · PROMPT STORAGE INTERNALS</div>
+      <h1>Prompt 存储内部</h1>
+      <div class="meta">Postgres 表结构 + audit_logs + is_active 真相。仅给需要深挖的 on-call / 合规审计。</div>
+    </header>
+
+    <div class="objective">
+      <strong>本页目标</strong><br>
+      直接看 Langfuse v4 自托管 Postgres 里 prompt 相关表长什么样。重点：哪些是事实、哪些是设计选择、哪些是历史遗留。
+    </div>
+
+    <h2>1. <code>prompts</code> 表（核心）</h2>
+
+    <pre><code>prompts (
+ id              text PK,           -- 每版独立 UUID
+ created_at      timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ updated_at      timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+ project_id      text NOT NULL,
+ created_by      text NOT NULL,     -- "API" / "USER"
+ name            text NOT NULL,     -- 跨版本共用的逻辑键
+ version         integer NOT NULL,
+ is_active       boolean NULL,      -- ⚠️ 历史遗留字段，不用
+ config          json NOT NULL DEFAULT '{}',
+ prompt          jsonb NOT NULL,    -- text=str / chat=messages 数组
+ type            text NOT NULL DEFAULT 'text',
+ tags            text[],
+ labels          text[],           -- GIN 索引，高效按 label 查
+ commit_message  text,
+
+ UNIQUE (project_id, name, version)  -- 同一 project 下同名只能有一个 v1
+)</code></pre>
+
+    <h3>5 个有意思的 schema 细节</h3>
+
+    <table>
+      <thead><tr><th>观察</th><th>含义</th></tr></thead>
+      <tbody>
+        <tr><td><code>UNIQUE (project_id, name, version)</code></td><td>业务逻辑："同一逻辑名 v1 只能有一条"</td></tr>
+        <tr><td><code>labels / tags</code> 都有 GIN 索引</td><td>支持高效"按 label 查询"</td></tr>
+        <tr><td><code>prompt</code> 是 <code>jsonb</code> 不是 text</td><td>chat prompt 的 messages 数组就靠这个</td></tr>
+        <tr><td><code>created_by</code> 是 NOT NULL</td><td>必须记录创建者（API 或用户）</td></tr>
+        <tr><td><code>config</code> 默认 <code>'{}'::json</code></td><td>没传 config 时默认空字典</td></tr>
+      </tbody>
+    </table>
+
+    <h2>2. <code>is_active</code> 字段的真相</h2>
+
+    <p>DB 列是 <strong>历史遗留</strong>，API 的 <code>isActive</code> 是动态算出来的。</p>
+
+    <h3>实测对账（用我们本地的 movie-critic）</h3>
+
+    <table>
+      <thead><tr><th>来源</th><th>v1</th><th>v2</th></tr></thead>
+      <tbody>
+        <tr><td>DB 列 <code>is_active</code></td><td>NULL</td><td>NULL</td></tr>
+        <tr><td>API <code>isActive</code></td><td><code>true</code></td><td><code>false</code></td></tr>
+        <tr><td>API <code>labels</code></td><td><code>["production"]</code></td><td><code>["latest"]</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>推断 API 的计算规则</h3>
+    <pre><code>isActive = "production" in labels</code></pre>
+
+    <table>
+      <thead><tr><th>labels</th><th>isActive</th></tr></thead>
+      <tbody>
+        <tr><td><code>["production"]</code></td><td>True</td></tr>
+        <tr><td><code>["latest"]</code></td><td>False</td></tr>
+        <tr><td><code>["production", "staging"]</code></td><td>True</td></tr>
+        <tr><td><code>["staging"]</code></td><td>False</td></tr>
+        <tr><td><code>[]</code></td><td>False</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout">
+      <strong>结论</strong>：API 的 <code>isActive</code> 含义是"这个版本是不是 production label 当前指向的版本"，不是"是不是活跃 row"。<br>
+      ⚠️ DB 的 <code>is_active</code> 列是历史遗留（未使用），UI 和 API 的 <code>isActive</code> 才是真相。
+    </div>
+
+    <h2>3. <code>audit_logs</code> 表（重要：审计范围有限）</h2>
+
+    <pre><code>audit_logs (
+ id, created_at, updated_at,
+ user_id,                  -- 谁操作的
+ project_id,
+ resource_type text,       -- 'prompt' / 'trace' / ...
+ resource_id,
+ action text,              -- 当前只有 'create'
+ before text,              -- 变更前完整快照
+ after text,               -- 变更后完整快照
+ org_id,
+ user_org_role,
+ user_project_role,
+ api_key_id,
+ type                       -- 'USER' / 'API'
+)</code></pre>
+
+    <h3>实测查到的 action 类型</h3>
+    <pre><code>SELECT DISTINCT action FROM audit_logs;
+-- 只有一行: 'create'</code></pre>
+
+    <h3>关键缺口：label 切换不审计</h3>
+
+    <table>
+      <thead><tr><th>操作</th><th>是否记 audit</th></tr></thead>
+      <tbody>
+        <tr><td>创建版本</td><td>✅ 记（<code>create</code> action）</td></tr>
+        <tr><td>切 <code>production</code> label</td><td>❌ 不记</td></tr>
+        <tr><td>自动 <code>latest</code> 转移</td><td>❌ 不记</td></tr>
+        <tr><td>update_prompt 改 labels</td><td>❌ 不记</td></tr>
+      </tbody>
+    </table>
+
+    <div class="callout warn">
+      <strong>⚠️ 唯一能看出 label 改过的痕迹</strong>：<code>prompts.updated_at</code> + 创建时刻的 labels + commit_message。
+    </div>
+
+    <h2>4. 实际查到的数据（movie-critic）</h2>
+
+    <pre><code>SELECT action, before, after FROM audit_logs WHERE resource_type = 'prompt';
+
+| action | before | after（labels 部分）                            |
+|--------|--------|------------------------------------------------|
+| create | NULL   | v1, labels=["production", "latest"]             |
+| create | NULL   | v2, labels=["latest"]                           |
+
+-- v1 的 'latest' 被 v2 摘走这件事完全不记 audit</code></pre>
+
+    <p>但 <code>prompts</code> 表里有物理痕迹：</p>
+
+    <pre><code>v1.created_at = 2026-09-16 05:32:17   ← v1 创建
+v1.updated_at = 2026-09-16 05:46:07   ← 被 v2 创建连带改了 labels
+v2.created_at = 2026-09-16 05:46:07   ← v2 创建时刻
+v2.updated_at = 2026-09-16 05:46:07   ← 等于 created_at（labels 没再被改）</code></pre>
+
+    <p>v1 和 v2 的时间戳精确到毫秒一致——这是 Langfuse 内部事务的物理痕迹。</p>
+
+    <h2>5. label 历史怎么还原</h2>
+
+    <p>每个版本的 <code>created_at</code> / <code>updated_at</code> / 创建时的初始 labels + commitMessage → 拼出 label 在 N 个版本间的迁移路径。</p>
+
+    <h3>两条间接还原途径</h3>
+
+    <p><strong>途径 A：从 trace 反推</strong></p>
+    <pre><code># 查"v5 上线期间"的所有 trace
+traces = lf.api.observations.get_many(
+    filter='{"promptVersion": 5}',
+    fromStartTime='2026-09-01',
+    toStartTime='2026-09-10',
+)
+# 看时间分布 → 反推"v5 在哪个时间段是 production"</code></pre>
+
+    <p><strong>途径 B：commit_message + 创建时机</strong></p>
+    <pre><code>v3: "v2 had safety issue, revert to safety disclaimer"
+v5: "A/B test vs v4, +12% conversion"
+v7: "promote v7 to prod, monitor 24h"</code></pre>
+
+    <p>从 commit_message + created_at 也能拼出大致时间线。<strong>但只依赖人工纪律</strong>。</p>
+
+    <h2>6. 合规审计的实操建议</h2>
+
+    <p>Langfuse 当前审计范围有限，要严格合规需要外面套一层自己的 audit log：</p>
+
+    <pre><code># prompt_audit.py —— 部署到所有改 prompt label 的入口
+from datetime import datetime
+import json
+
+def promote_to_production(name: str, version: int, reason: str, ticket: str = ""):
+    lf = get_client()
+    audit = {
+        "timestamp": datetime.utcnow().isoformat(),
+        "action": "promote_to_production",
+        "prompt_name": name,
+        "version": version,
+        "reason": reason,
+        "ticket": ticket,
+        "actor": os.getenv("USER", "unknown"),
+    }
+    with open("/var/log/prompt-audit.jsonl", "a") as f:
+        f.write(json.dumps(audit) + "\n")
+    lf.api.prompts.update(name=name, version=version, new_labels=["production"])</code></pre>
+
+    <p>把这种函数包成 CLI / CI 步骤，所有切 label 都走这里 → 自己的审计日志就有了。</p>
+
+    <h2>7. 其他相关表</h2>
+
+    <table>
+      <thead><tr><th>表</th><th>用途</th></tr></thead>
+      <tbody>
+        <tr><td><code>prompts</code></td><td>主表，存每个版本</td></tr>
+        <tr><td><code>prompt_dependencies</code></td><td>Prompt References 的父子关系</td></tr>
+        <tr><td><code>prompt_protected_labels</code></td><td>Protected Labels 配置（Enterprise）</td></tr>
+        <tr><td><code>audit_logs</code></td><td>操作审计（仅 create）</td></tr>
+      </tbody>
+    </table>
+
+    <footer class="lesson-footer">
+      相关：<a href="prompt-data-model.html">数据模型</a> · <a href="prompt-operations-playbook.html">运维 SOP</a> · <a href="prompt-pitfalls-cheatsheet.html">踩坑速查</a><br>
+      主课：<a href="../lessons/0004-prompt-management.html">Lesson 0004 · Prompt 搬出代码</a>
+    </footer>
+  </main>
+</div>
+
+<script src="../assets/toc.js"></script>
+</body>
+</html>
