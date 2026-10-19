@@ -94,55 +94,61 @@ def get_llm(
 ) -> ChatOpenAI:
     """Return a ``ChatOpenAI`` instance for the named role (per FR-005 + contract §C2).
 
-    spec 002 implements ``role="plan"`` (DashScope OpenAI-compatible qwen-plus);
-    other roles raise ``NotYetImplementedError`` for spec 003/004 to fill in.
+    spec 002 implements ``role="plan"`` (DashScope OpenAI-compatible qwen-plus,
+    temperature=0.4).
+    spec 003 implements ``role="research"`` (same model, temperature=0.2 — lower
+    for query diversity / focus; per [Q3] clarification).
+    Other roles raise ``NotYetImplementedError`` for spec 004 to fill in.
 
     Parameters
     ----------
     role : Literal["plan", "research", "write", "critic", "polish"]
-        Logical LLM role. Only ``"plan"`` is wired in spec 002.
+        Logical LLM role. ``"plan"`` + ``"research"`` are wired.
 
     Returns
     -------
     langchain_openai.ChatOpenAI
-        For ``role="plan"``: configured with DashScope base_url,
-        ``qwen-plus-2025-04-28``, ``temperature=0.4``.
+        For ``role="plan"``: ``temperature=0.4``.
+        For ``role="research"``: ``temperature=0.2``.
 
     Raises
     ------
     NotYetImplementedError
-        ``role in {"research", "write", "critic", "polish"}`` (spec 003/004).
+        ``role in {"write", "critic", "polish"}`` (spec 004).
     RuntimeError
-        ``DASHSCOPE_API_KEY`` not set in environment (C2 TC-3).
+        ``DASHSCOPE_API_KEY`` not set in environment.
     """
-    if role == "plan":
+    if role in ("plan", "research"):
         api_key = os.environ.get("DASHSCOPE_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "DASHSCOPE_API_KEY not set; set it in .env to call the plan LLM"
+                "DASHSCOPE_API_KEY not set; set it in .env to call the LLM"
             )
         # Per spec 002 research §R3: default to the public OpenAI-compatible
-        # DashScope endpoint.  ``DASHSCOPE_API_BASE_URL`` overrides for regional
-        # gateways or self-hosted proxies.  FR-016 forbids *new* env vars but
-        # using an already-declared one is the right thing to do here.
+        # DashScope endpoint. ``DASHSCOPE_API_BASE_URL`` overrides for regional
+        # gateways or self-hosted proxies.
         base_url = os.environ.get(
             "DASHSCOPE_API_BASE_URL",
             "https://dashscope.aliyuncs.com/compatible-mode/v1",
         )
         # spec 002 originally hardcoded ``qwen-plus-2025-04-28`` (per research
         # §R3), but the regional Aliyun MaaS instance serving this deployment
-        # only exposes qwen3.x / glm-5.x / deepseek-v4.x.  ``DASHSCOPE_MODEL``
+        # only exposes qwen3.x / glm-5.x / deepseek-v4.x. ``DASHSCOPE_MODEL``
         # lets the deployer pin the actual model; default keeps the spec value
         # so public DashScope works out-of-the-box.
         model = os.environ.get("DASHSCOPE_MODEL", "qwen3.7-plus")
+        # spec 003 [Q3]: research LLM uses lower temperature (0.2 vs plan's 0.4)
+        # to keep query generation focused and avoid LLM "creativity" on search
+        # query strings.
+        temperature = 0.2 if role == "research" else 0.4
         return ChatOpenAI(
             model=model,
             api_key=api_key,
             base_url=base_url,
-            temperature=0.4,
+            temperature=temperature,
         )
 
-    # Other roles deferred to spec 003 / 004
+    # write / critic / polish deferred to spec 004
     raise NotYetImplementedError(f"get_llm not yet implemented: {role}")
 
 
