@@ -14,11 +14,18 @@
       <li><a href="0001-deploy-langfuse-locally.html">0001 · 部署</a></li>
       <li><a href="0002-minimal-sdk-hello-trace.html">0002 · Hello Trace</a></li>
       <li><a href="0003-langgraph-react-agent.html">0003 · ReAct Agent</a></li>
-      <li><a href="0004-prompt-management.html">0004 · Prompt</a></li>
+      <li><a href="0004-prompt-management.html">0004 · Prompt 管理</a></li>
       <li><a href="0005-01-scoring-fundamentals.html" class="active">0005 · 评分(1/3)</a></li>
+      <li><a href="0005-02-scoring-evaluators.html">0005 · 评分(2/3)</a></li>
+      <li><a href="0005-03-scoring-workflows.html">0005 · 评分(3/3)</a></li>
       <li class="sep">·</li>
       <li><a href="../reference/glossary.html">术语表</a></li>
       <li><a href="../reference/metadata-cheatsheet.html">字段表</a></li>
+      <li><a href="../reference/prompt-data-model.html">Prompt 模型</a></li>
+      <li><a href="../reference/prompt-code-integration.html">代码接入</a></li>
+      <li><a href="../reference/prompt-operations-playbook.html">运维 SOP</a></li>
+      <li><a href="../reference/prompt-storage-internals.html">存储内部</a></li>
+      <li><a href="../reference/prompt-pitfalls-cheatsheet.html">踩坑速查</a></li>
       <li><a href="../RESOURCES.md">资源</a></li>
       <li><a href="../NOTES.md">笔记</a></li>
     </ul>
@@ -149,85 +156,129 @@
 
     <p>下面这张时序图展示了一次 LLM 调用产生 trace、再上报到 Langfuse 的全过程：</p>
 
-    <svg viewBox="0 0 760 380" xmlns="http://www.w3.org/2000/svg" style="max-width:760px;width:100%;height:auto;display:block;margin:18px auto;">
+    <svg viewBox="0 0 1100 620" xmlns="http://www.w3.org/2000/svg" style="max-width:1100px;width:100%;height:auto;display:block;margin:18px auto;">
       <defs>
-        <marker id="seqArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <marker id="seqArr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="#666"/>
         </marker>
-        <marker id="seqArrOk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+        <marker id="seqArrOk" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
           <path d="M0,0 L10,5 L0,10 z" fill="#2d7a3d"/>
+        </marker>
+        <marker id="seqArrAsync" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="#8a6a17"/>
         </marker>
       </defs>
 
       <!-- Lifelines header -->
-      <rect x="60"  y="20" width="100" height="32" rx="4" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1.2"/>
-      <text x="110" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">App</text>
+      <rect x="50"  y="20" width="140" height="36" rx="4" fill="#f0f7f4" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="120" y="38" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">App</text>
+      <text x="120" y="52" text-anchor="middle" font-size="10" fill="#666">用户代码</text>
 
-      <rect x="200" y="20" width="100" height="32" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.2"/>
-      <text x="250" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">SDK</text>
+      <rect x="240" y="20" width="160" height="36" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="320" y="38" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">Langfuse SDK</text>
+      <text x="320" y="52" text-anchor="middle" font-size="10" fill="#666">@observe / score_*</text>
 
-      <rect x="340" y="20" width="100" height="32" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1.2"/>
-      <text x="390" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#8a6a17">Queue</text>
+      <rect x="450" y="20" width="140" height="36" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1.5"/>
+      <text x="520" y="38" text-anchor="middle" font-size="13" font-weight="700" fill="#8a6a17">In-Memory Queue</text>
+      <text x="520" y="52" text-anchor="middle" font-size="10" fill="#666">进程内 buffer</text>
 
-      <rect x="480" y="20" width="100" height="32" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.2"/>
-      <text x="530" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">Exporter</text>
+      <rect x="640" y="20" width="160" height="36" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="1.5"/>
+      <text x="720" y="38" text-anchor="middle" font-size="13" font-weight="700" fill="#0066cc">OTel Exporter</text>
+      <text x="720" y="52" text-anchor="middle" font-size="10" fill="#666">独立线程 / 定时</text>
 
-      <rect x="620" y="20" width="120" height="32" rx="4" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.2"/>
-      <text x="680" y="40" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">Langfuse 后端</text>
+      <rect x="850" y="20" width="200" height="36" rx="4" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1.5"/>
+      <text x="950" y="38" text-anchor="middle" font-size="13" font-weight="700" fill="#2d7a3d">Langfuse 后端</text>
+      <text x="950" y="52" text-anchor="middle" font-size="10" fill="#666">web / otlp endpoint</text>
 
       <!-- Lifelines vertical -->
-      <line x1="110" y1="52" x2="110" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
-      <line x1="250" y1="52" x2="250" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
-      <line x1="390" y1="52" x2="390" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
-      <line x1="530" y1="52" x2="530" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
-      <line x1="680" y1="52" x2="680" y2="370" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="120" y1="56" x2="120" y2="600" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="320" y1="56" x2="320" y2="600" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="520" y1="56" x2="520" y2="600" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="720" y1="56" x2="720" y2="600" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
+      <line x1="950" y1="56" x2="950" y2="600" stroke="#bbb" stroke-width="0.5" stroke-dasharray="3 3"/>
 
-      <!-- Loop 1: incoming requests -->
-      <rect x="20" y="64" width="720" height="80" fill="none" stroke="#999" stroke-width="0.5" stroke-dasharray="4 3" rx="4"/>
-      <text x="28" y="78" font-size="10" fill="#666" font-style="italic">loop: incoming requests (毫秒级)</text>
+      <!-- 时间分层 banner -->
+      <rect x="50" y="80" width="1000" height="22" rx="4" fill="#e6f0fa" stroke="#0066cc" stroke-width="0.8"/>
+      <text x="60" y="96" font-size="11" fill="#0066cc" font-weight="700">⏱ 同步路径（毫秒级）—— app 调完 LLM 立即返回用户</text>
 
-      <!-- App → SDK createTrace -->
-      <text x="135" y="100" font-size="10" fill="#444">call LLM + trace</text>
-      <path d="M110,100 L240,100" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
+      <!-- Step 1: App → SDK -->
+      <text x="180" y="125" font-size="11" fill="#444">① <tspan font-family="ui-monospace,monospace" font-weight="700">agent.invoke(q)</tspan> / score_*()</text>
+      <path d="M120,125 L310,125" stroke="#666" stroke-width="1.3" marker-end="url(#seqArr)" fill="none"/>
 
-      <!-- SDK → Queue enqueue -->
-      <text x="285" y="100" font-size="10" fill="#444">createTrace()</text>
-      <path d="M250,100 L380,100" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
+      <!-- Step 2: SDK 创建 observation（活跃区）-->
+      <rect x="295" y="135" width="50" height="14" fill="#e6f0fa" stroke="#0066cc" stroke-width="0.8"/>
+      <text x="320" y="146" text-anchor="middle" font-size="9" fill="#0066cc">SDK active</text>
 
-      <!-- App returns to user (no waiting for flush) -->
-      <text x="115" y="125" font-size="10" fill="#2d7a3d">返回用户响应</text>
-      <path d="M100,125 L40,125" stroke="#2d7a3d" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#seqArrOk)" fill="none"/>
-      <text x="38" y="129" text-anchor="end" font-size="10" fill="#666">user</text>
+      <!-- Step 3: SDK → Queue enqueue (async, non-blocking) -->
+      <text x="395" y="170" font-size="11" fill="#444">② <tspan font-family="ui-monospace,monospace" font-weight="700">enqueue(span)</tspan> <tspan fill="#8a6a17" font-style="italic">异步</tspan></text>
+      <path d="M320,170 L510,170" stroke="#8a6a17" stroke-width="1.3" marker-end="url(#seqArrAsync)" fill="none"/>
 
-      <!-- App 继续处理 -->
-      <text x="115" y="142" font-size="10" fill="#666" font-style="italic">app 继续处理其他请求</text>
+      <!-- Queue 状态 -->
+      <rect x="490" y="180" width="60" height="20" rx="2" fill="#fff8e1" stroke="#c9a227" stroke-width="0.8"/>
+      <text x="520" y="194" text-anchor="middle" font-size="10" fill="#8a6a17" font-weight="700">[span, span, score]</text>
 
-      <!-- Loop 2: background flush -->
-      <rect x="20" y="158" width="720" height="60" fill="none" stroke="#999" stroke-width="0.5" stroke-dasharray="4 3" rx="4"/>
-      <text x="28" y="172" font-size="10" fill="#666" font-style="italic">loop: background timer / batch size（秒级，独立线程）</text>
+      <!-- Step 4: App 立即返回用户 -->
+      <text x="80" y="215" font-size="11" fill="#2d7a3d" font-weight="700">③ 返回用户响应</text>
+      <text x="80" y="230" font-size="10" fill="#666">user</text>
+      <path d="M115,222 L60,222" stroke="#2d7a3d" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#seqArrOk)" fill="none"/>
 
-      <text x="555" y="195" font-size="10" fill="#444">send batch</text>
-      <path d="M530,195 L670,195" stroke="#666" stroke-width="1.2" marker-end="url(#seqArr)" fill="none"/>
-      <text x="555" y="210" font-size="10" fill="#444">ack</text>
-      <path d="M670,210 L540,210" stroke="#666" stroke-width="1.2" stroke-dasharray="3 3" marker-end="url(#seqArr)" fill="none"/>
+      <!-- App 继续 -->
+      <text x="125" y="252" font-size="10" fill="#666" font-style="italic">app 继续处理其他请求（不等上报）</text>
 
-      <!-- 短脚本场景：flush 强制时机 -->
-      <rect x="20" y="234" width="720" height="62" rx="6" fill="#fdf3f1" stroke="#c0392b" stroke-width="1"/>
-      <text x="32" y="254" font-size="12" font-weight="700" fill="#c0392b">⚠️ 短生命周期应用（脚本 / batch / cron job）</text>
-      <text x="32" y="272" font-size="11" fill="#222">进程退出前<tspan font-family="ui-monospace,monospace" fill="#c0392b" font-weight="700"> 必须 </tspan>显式 <tspan font-family="ui-monospace,monospace" fill="#c0392b">get_client().flush()</tspan>，否则队列里的 trace 丢失。</text>
-      <text x="32" y="288" font-size="10" fill="#666" font-style="italic">Lesson 0002 已演示过 hello_trace.py 末尾的 flush() 调用。</text>
+      <!-- 时间分层 banner 2 -->
+      <rect x="50" y="275" width="1000" height="22" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="0.8"/>
+      <text x="60" y="291" font-size="11" fill="#8a6a17" font-weight="700">⏱ 异步路径（秒级）—— 后台线程定时 / batch 满了 / 显式 flush()</text>
 
-      <!-- 长跑应用 -->
-      <rect x="20" y="306" width="720" height="50" rx="6" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1"/>
-      <text x="32" y="326" font-size="12" font-weight="700" fill="#2d7a3d">✅ 长跑应用（web server / API / 常驻 worker）</text>
-      <text x="32" y="344" font-size="11" fill="#222">exporter 持续运行，不需要 flush；进程终止时优雅处理即可。</text>
+      <!-- Step 5: Exporter 拉取 -->
+      <text x="595" y="320" font-size="11" fill="#444">④ <tspan font-family="ui-monospace,monospace" font-weight="700">drain(batch)</tspan></text>
+      <path d="M710,320 L525,320" stroke="#8a6a17" stroke-width="1.3" marker-end="url(#seqArrAsync)" fill="none"/>
+
+      <!-- Step 6: Exporter 序列化 -->
+      <rect x="700" y="330" width="60" height="20" rx="2" fill="#e6f0fa" stroke="#0066cc" stroke-width="0.8"/>
+      <text x="730" y="344" text-anchor="middle" font-size="10" fill="#0066cc" font-weight="700">OTLP/protobuf</text>
+
+      <!-- Step 7: Exporter → Langfuse HTTP POST -->
+      <text x="800" y="370" font-size="11" fill="#444">⑤ <tspan font-family="ui-monospace,monospace" font-weight="700">POST /api/public/otlp/v1/traces</tspan></text>
+      <path d="M730,370 L940,370" stroke="#666" stroke-width="1.3" marker-end="url(#seqArr)" fill="none"/>
+
+      <!-- Step 8: Langfuse 解析 -->
+      <rect x="930" y="380" width="60" height="20" rx="2" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="0.8"/>
+      <text x="960" y="394" text-anchor="middle" font-size="10" fill="#2d7a3d" font-weight="700">parse OTLP</text>
+
+      <!-- Step 9: Langfuse → 双存储 -->
+      <text x="975" y="420" font-size="11" fill="#444">⑥ 双写</text>
+      <path d="M950,420 L1010,420" stroke="#2d7a3d" stroke-width="1.3" fill="none"/>
+
+      <!-- ClickHouse -->
+      <rect x="1010" y="405" width="80" height="32" rx="3" fill="#e6f0fa" stroke="#0066cc" stroke-width="1"/>
+      <text x="1050" y="420" text-anchor="middle" font-size="10" font-weight="700" fill="#0066cc">ClickHouse</text>
+      <text x="1050" y="432" text-anchor="middle" font-size="9" fill="#666">observations</text>
+
+      <!-- Postgres -->
+      <rect x="1010" y="445" width="80" height="32" rx="3" fill="#eaf6ec" stroke="#2d7a3d" stroke-width="1"/>
+      <text x="1050" y="460" text-anchor="middle" font-size="10" font-weight="700" fill="#2d7a3d">Postgres</text>
+      <text x="1050" y="472" text-anchor="middle" font-size="9" fill="#666">metadata + scores</text>
+
+      <!-- Step 10: ack 返回 -->
+      <text x="800" y="500" font-size="11" fill="#2d7a3d">⑦ 200 OK（ack）</text>
+      <path d="M940,500 L730,500" stroke="#2d7a3d" stroke-width="1.3" stroke-dasharray="3 3" marker-end="url(#seqArrOk)" fill="none"/>
+
+      <!-- Exporter 清空 -->
+      <text x="600" y="530" font-size="11" fill="#444">⑧ <tspan font-family="ui-monospace,monospace" font-weight="700">queue.clear()</tspan></text>
+      <path d="M710,530 L525,530" stroke="#666" stroke-width="1.3" marker-end="url(#seqArr)" fill="none"/>
+
+      <!-- Multi-exporter 提示 -->
+      <rect x="50" y="550" width="1000" height="34" rx="4" fill="#faf8ef" stroke="#c9a227" stroke-width="1" stroke-dasharray="4 3"/>
+      <text x="60" y="565" font-size="11" font-weight="700" fill="#8a6a17">🔀 同一份 trace 可以同时发给多个 OTEL 后端：</text>
+      <text x="60" y="580" font-size="10" fill="#666" font-family="ui-monospace,monospace">Langfuse + Datadog + Jaeger + Honeycomb + ... （互不冲突，每条 span 各发一份）</text>
     </svg>
 
-    <p><strong>关键点</strong>（这张图背后的 4 条机制）：</p>
+    <p><strong>关键点</strong>（这张图背后的 5 条机制）：</p>
     <ul>
       <li><strong>非阻塞</strong>——app 调完 LLM 立即返回，trace 在后台批量上报（实测 latency 影响 &lt; 1ms）</li>
-      <li><strong>短脚本必加 <code>flush()</code></strong>——一次性脚本在退出前必须显式调用，否则队列里未发送的 trace 丢失（Lesson 0002 hello_trace.py 已演示）</li>
-      <li><strong>长跑应用不需 flush</strong>——exporter 在独立线程持续运行，进程优雅退出时由 OTel SDK 处理</li>
+      <li><strong>异步队列在进程内</strong>——queue 是 in-memory buffer，进程崩溃 = 队列丢失；所以短脚本必须 <code>flush()</code></li>
+      <li><strong>OTLP 协议标准化</strong>——同一份 trace 可以同时发给 Langfuse + Datadog + Jaeger 等多个后端（多 exporter 不冲突）</li>
+      <li><strong>双写存储</strong>——Langfuse 后端把 trace 写 ClickHouse（observations 主体）、metadata / score 写 Postgres</li>
       <li><strong>v4 默认 events_only</strong>——意味着传统 <code>/api/public/traces</code> REST 端点会 404；查数据请用 v2/observations API 或 <code>npx @langfuse/cli</code></li>
     </ul>
 

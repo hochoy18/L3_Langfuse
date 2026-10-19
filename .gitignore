@@ -28,3 +28,9 @@ uv.lock
 *.log
 .mypy_cache/
 .ruff_cache/
+
+# Local Claude Code state (skills, memory, settings)
+.claude/
+
+# Local Playwright MCP debug logs
+.playwright-mcp/

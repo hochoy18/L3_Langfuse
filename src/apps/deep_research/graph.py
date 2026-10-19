@@ -3,7 +3,8 @@
 Public API:
 - ``build_graph(db_uri=None)`` → compiled ``StateGraph`` with PostgresSaver attached
 - ``run_research(input, *, thread_id=None, config=None)`` → final state dict
-  (or ``{"error": "no_pending_interrupt", "thread_id": ...}`` per Q3)
+  (or ``{"error": "no_pending_interrupt", "thread_id": ...}`` per Q3,
+   or ``{"error": "thread_id_busy", "thread_id": ...}`` per FR-017)
 
 Graph topology (per ADR-0001):
 
@@ -12,13 +13,22 @@ Graph topology (per ADR-0001):
                           plan (when user rejects)
 
 ``research`` and ``write`` are compiled sub-graphs attached as nodes.
+
+spec 002 additions (per FR-017):
+- ``_acquire_thread_lock(tid)`` — Postgres advisory lock scoped to thread_id,
+  1s timeout, auto-released on transaction commit/rollback.
+- ``run_research`` acquires the lock before any ``graph.invoke`` /
+  ``_has_pending_interrupt`` call. Lock contention returns
+  ``{"error": "thread_id_busy", "thread_id": tid}`` instead of throwing.
 """
 from __future__ import annotations
 
 import os
 import uuid
+from contextlib import contextmanager
 from typing import Any
 
+import psycopg
 from langgraph.checkpoint.postgres import PostgresSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
@@ -32,7 +42,10 @@ from src.apps.deep_research.state import DeepResearchState
 # ADR-0005 default connection string. Override via LANGGRAPH_CHECKPOINT_DB env var.
 DEFAULT_DB_URI = "postgresql://postgres:postgres@localhost:5432/postgres"
 
-__all__ = ["build_graph", "run_research", "DEFAULT_DB_URI"]
+# spec 002 FR-017: max seconds to wait for the thread_id advisory lock.
+_ADVISORY_LOCK_TIMEOUT_S = 1
+
+__all__ = ["build_graph", "run_research", "DEFAULT_DB_URI", "_acquire_thread_lock"]
 
 
 def _resolve_db_uri(db_uri: str | None) -> str:
@@ -61,6 +74,50 @@ def _normalize_pg_uri(uri: str) -> str:
     import re
 
     return re.sub(r"^postgresql\+\w+://", "postgresql://", uri)
+
+
+@contextmanager
+def _acquire_thread_lock(tid: str):
+    """Acquire a Postgres advisory lock scoped to ``tid`` (per FR-017).
+
+    Uses ``pg_advisory_xact_lock(hashtext(tid))`` inside a short transaction;
+    the lock is **auto-released** when the transaction ends (commit or
+    rollback), so we never hold it past ``graph.invoke``'s scope.
+
+    The lock is acquired with a ``SET LOCAL lock_timeout`` of 1s so that a
+    concurrent second process returns ``psycopg.errors.LockNotAvailable``
+    within ~1s instead of blocking forever (NFR-001, research.md §R4).
+
+    Yields
+    ------
+    psycopg.Connection
+        Open connection (for inspection / early commit if needed).  Callers
+        normally ignore the value; the context manager handles ``__exit__``.
+
+    Raises
+    ------
+    psycopg.errors.LockNotAvailable
+        Another process holds the lock for this ``tid`` and the 1s timeout
+        expired. ``run_research`` catches this and returns
+        ``{"error": "thread_id_busy", "thread_id": tid}``.
+    """
+    uri = _normalize_pg_uri(os.environ.get("LANGGRAPH_CHECKPOINT_DB", DEFAULT_DB_URI))
+    conn = psycopg.connect(uri, connect_timeout=3)
+    try:
+        with conn.transaction():
+            with conn.cursor() as cur:
+                cur.execute("SET LOCAL lock_timeout = '1s'")
+                # ``hashtext`` is built-in; the int4 result fits pg_advisory_xact_lock(bigint).
+                # Convert to bigint via the ``::bigint`` cast so pg_advisory_xact_lock's
+                # single-arg (bigint) overload is picked.
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(%s)::bigint)", (tid,)
+                )
+            # Yield inside the transaction so the lock is held until the
+            # ``with conn.transaction():`` block exits.
+            yield conn
+    finally:
+        conn.close()
 
 
 # Sentinel: ``_NO_CHECKPOINTER`` distinguishes "no checkpointer at all" from
@@ -121,7 +178,15 @@ def build_graph(
 
     g.add_edge(START, "plan")
     g.add_edge("plan", "confirm_plan")
-    g.add_edge("confirm_plan", "research")
+    # Conditional edge after confirm_plan: re-plan on "edit:", else continue.
+    # Using a conditional edge (not Command(goto="plan")) avoids the
+    # "Can receive only one value per step" error in LangGraph 1.2.x when the
+    # last HumanMessage in state["messages"] starts with "edit:".
+    g.add_conditional_edges(
+        "confirm_plan",
+        _after_confirm_plan,
+        {"plan": "plan", "research": "research"},
+    )
     g.add_edge("research", "write")
     g.add_edge("write", END)
 
@@ -129,6 +194,26 @@ def build_graph(
     if saver_ctx is not None:
         compiled._deep_research_saver_ctx = saver_ctx  # type: ignore[attr-defined]
     return compiled
+
+
+def _after_confirm_plan(state: DeepResearchState) -> str:
+    """Decide the next node after ``confirm_plan`` (per spec 002 FR-008).
+
+    Returns
+    -------
+    str
+        ``"plan"`` if the most recent ``HumanMessage`` in ``state["messages"]``
+        starts with ``"edit:"`` (the user wants the plan regenerated);
+        ``"research"`` otherwise (approved → continue to the research stage).
+    """
+    msgs = state.get("messages", []) or []
+    for msg in reversed(msgs):
+        if getattr(msg, "type", None) == "human" or isinstance(msg, dict) and msg.get("type") == "human":
+            content = msg.get("content", "") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if isinstance(content, str) and content.startswith("edit:"):
+                return "plan"
+            return "research"
+    return "research"
 
 
 def _has_pending_interrupt(graph, config: dict) -> bool:
@@ -153,15 +238,17 @@ def run_research(
 ) -> dict:
     """Run the deep research graph end-to-end (or resume from an interrupt).
 
-    Per FR-007 + Q3 + Q4:
+    Per FR-007 + Q3 + Q4 + spec 002 FR-017:
     - ``input`` is either a dict (initial state) or a ``Command(resume=...)``
     - If a ``Command(resume=...)`` arrives but the thread has no pending
       interrupt, returns ``{"error": "no_pending_interrupt", "thread_id": ...}``
+    - If the thread_id advisory lock is held by another process, returns
+      ``{"error": "thread_id_busy", "thread_id": ...}`` without invoking the
+      graph (FR-017 + research §R4).
     - Initializes ``state["iteration_counts"] = {"research": 0, "write": 0}``
       and ``state["auto_confirm_plan"] = False`` (overridable from input dict)
-    - The compiled graph is created lazily per call; callers wanting to share
-      a graph can pre-build and pass via ``config["configurable"]["graph"]``
-      (not in foundation spec; reserved for spec 005 Streamlit reuse).
+    - The compiled graph is created lazily per call (per FR-014: every call
+      must build a fresh graph so cross-process resume works).
     """
     tid = thread_id or str(uuid.uuid4())
     base_config: dict = {"configurable": {"thread_id": tid}}
@@ -170,28 +257,39 @@ def run_research(
         merged = {**config, "configurable": {**config.get("configurable", {}), "thread_id": tid}}
         base_config = merged
 
+    # Helper: invoke a callable under the per-thread advisory lock.  Returns
+    # either the callable's result, or a thread_id_busy error dict.
+    def _under_lock(fn):
+        try:
+            with _acquire_thread_lock(tid):
+                return fn()
+        except psycopg.errors.LockNotAvailable:
+            return {"error": "thread_id_busy", "thread_id": tid}
+
     # Special contract: Command(resume=...) on a thread with no pending interrupt
     if isinstance(input, Command):
-        # Lazily build a graph to check the snapshot. We need a graph to read state;
-        # in spec 005 we'll cache it.
-        g = build_graph()
-        if not _has_pending_interrupt(g, base_config):
-            return {"error": "no_pending_interrupt", "thread_id": tid}
-        return g.invoke(input, config=base_config)
+        def _resume():
+            g = build_graph()
+            if not _has_pending_interrupt(g, base_config):
+                return {"error": "no_pending_interrupt", "thread_id": tid}
+            return g.invoke(input, config=base_config)
+        return _under_lock(_resume)
 
     # Initial run: build graph, init state, invoke
-    g = build_graph()
-    initial: dict = dict(input) if isinstance(input, dict) else {}
-    initial.setdefault("iteration_counts", {"research": 0, "write": 0})
-    initial.setdefault("auto_confirm_plan", False)
-    initial.setdefault("messages", [])
-    initial.setdefault("plan", [])
-    initial.setdefault("research_queries", [])
-    initial.setdefault("sources", [])
-    initial.setdefault("search_evaluations", [])
-    initial.setdefault("critique_history", [])
-    initial.setdefault("outline", "")
-    initial.setdefault("draft", "")
-    initial.setdefault("final_report", "")
+    def _initial():
+        g = build_graph()
+        initial: dict = dict(input) if isinstance(input, dict) else {}
+        initial.setdefault("iteration_counts", {"research": 0, "write": 0})
+        initial.setdefault("auto_confirm_plan", False)
+        initial.setdefault("messages", [])
+        initial.setdefault("plan", [])
+        initial.setdefault("research_queries", [])
+        initial.setdefault("sources", [])
+        initial.setdefault("search_evaluations", [])
+        initial.setdefault("critique_history", [])
+        initial.setdefault("outline", "")
+        initial.setdefault("draft", "")
+        initial.setdefault("final_report", "")
 
-    return g.invoke(initial, config=base_config)
+        return g.invoke(initial, config=base_config)
+    return _under_lock(_initial)

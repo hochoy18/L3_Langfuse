@@ -89,6 +89,33 @@ src/apps/deep_research/
 
 实现完成后，会在每个文件头加 ✅ 标记，并在 README 末尾加"实现进度表"。
 
+### spec 002 增量（Plan + Confirm 阶段）
+
+✅ **`src/apps/deep_research/prompts.py`** — `get_prompt` / `get_llm` 真实接入 Langfuse + DashScope
+✅ **`src/apps/deep_research/nodes/plan.py`** — `plan_node` 真接 LLM；`confirm_plan_node` 加 edit 分支
+✅ **`src/apps/deep_research/graph.py`** — `_acquire_thread_lock` + `thread_id_busy` 错误返回
+
+**前置 1 步（手动）**：在 Langfuse UI 创建 `deep-research-plan` prompt（label=production）。
+
+| 字段 | 值 |
+|---|---|
+| Name | `deep-research-plan` |
+| Type | `text` |
+| Labels | `production` |
+| Prompt | 见 [`specs/002-deep-research-plan-confirm/contracts/README.md §C6`](../../specs/002-deep-research-plan-confirm/contracts/README.md) |
+
+**必须含的 Mustache 占位符**（chevron 语法，**不要**用 `{{#if}}`，**用** `{{#user_feedback}}`）：
+
+| 占位符 | 必填 | 用途 |
+|---|---|---|
+| `{{user_query}}` | ✅ | 用户研究问题 |
+| `{{max_steps}}` | ✅ | 计划步数上限（hardcoded 7） |
+| `{{#user_feedback}}...{{/user_feedback}}` | ❌ | edit 模式下的用户反馈（空值时不渲染该段） |
+
+> 为什么不直接用 `prompt.compile()`：Langfuse 4.x `text` 类型的 `compile()` 只做 `{{var}}` 替换，不解析 `{{#if}}` 段。spec 002 改用 chevron 在客户端渲染完整 Mustache 模板。
+
+详细 spec 见 [`specs/002-deep-research-plan-confirm/spec.md`](../../specs/002-deep-research-plan-confirm/spec.md)。
+
 ---
 
 ## 🔗 关联资源

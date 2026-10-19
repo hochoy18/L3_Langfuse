@@ -51,6 +51,14 @@ def ensure_prompt_v1() -> int:
     except LangfuseError:
         # 没找到 / 没 label——下面创建
         print("[seed] no production version found, creating v1")
+    # except LangfuseNotFoundError as e:
+    #     print(type(e))
+    #     print(e)
+    except Exception as e:
+        # 没找到 / 没 label——下面创建
+        print("[seed] no production version found, creating v1")
+        print(type(e))
+        print(e)
 
     # 创建 v1，labels 里带 production
     lf.create_prompt(

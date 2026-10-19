@@ -15,13 +15,14 @@
 - 2026-09-16：lesson 2（hello trace）跑通；hello_trace 踩坑归档为 learning-record 0006
 - 2026-09-16：lesson 3（LangGraph ReAct + CallbackHandler）完成，对应 demo 在 `src/apps/fuse/react_agent.py`
 - 2026-09-16：lesson 4（Prompt Management）完成，demo 在 `src/apps/fuse/prompt_demo.py`，踩坑归档为 learning-record 0007
+- 2026-09-16：lesson 5 评分系列完成（拆3 个子节）+ 5 个 prompt-* reference 文档沉淀 + scoring_demo / user_feedback_demo 跑通，踩坑归档为 learning-record 0008
 
 ## 待办
 - ✅ lesson 1：本地部署
 - ✅ lesson 2：最小接入 + hello trace
 - ✅ lesson 3：LangGraph 集成
 - ✅ lesson 4：Prompt 管理
-- lesson 5：在线评估 + 用户反馈
+- ✅ lesson 5：在线评估 + 用户反馈（拆 3 子节：0005-01 基础 / 0005-02 Evaluator / 0005-03 工作流）
 - lesson 6：离线评估（dataset + experiment）
 - lesson 7：评估结果分析与 dashboard
 - lesson 8：踩坑复盘 + CI 集成思路
@@ -34,6 +35,7 @@
 - [[reference/prompt-pitfalls-cheatsheet.html]]：踩坑速查 —— 8 个常见坑 / 调试 SOP / 5 个反直觉认知
 
 ## 已沉淀的踩坑（按 lesson 倒序）
+- lesson 5 → [[learning-records/0008-scoring-pitfalls.md]]：Score 写不进去的 5 个 root cause（name 没建 / categorical 越界 / 缺 trace_id / 跨 context / 忘 flush）/ `update_current_generation(usage=)` TypeError / Judge 输出不稳
 - lesson 4 → [[learning-records/0007-prompt-management-three-pitfalls.md]]：三个 v3→v4 边界坑——`update_current_generation(prompt=...)` 必须传 PromptClient 对象而非字符串；`usage=` 不存在要 `usage_details=`；v4 events_only 模式让传统 `/api/public/traces` 404，要用 v2/observations
 - lesson 3 → [[learning-records/0006-hello-trace-custom-openai-client.md]]：两个不显然问题——非标准 env 名的 OpenAI 客户端构造；`from langfuse.openai import openai` 的真实作用是 monkey-patch 的副作用 import
 - lesson 1 → [[learning-records/0004-worker-redis-socket-timeout.md]]：v4 worker 报 redis socket timeout，根因是 clickhouse 抢 CPU
