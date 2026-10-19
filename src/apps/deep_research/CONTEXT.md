@@ -58,9 +58,10 @@
 
 | 术语 | 定义 |
 |---|---|
-| **OuterGraph** | 顶层图，4 个节点：`plan` → `confirm_plan` → `research` → `write` |
+| **OuterGraph** | 顶层图，5 个节点（spec 004 + `emit_final_report`）：`plan` → `confirm_plan` → `research` → `write` → `emit_final_report` |
 | **ResearchSubgraph** | 嵌套在 OuterGraph `research` 节点下的子图（gen_query → Send[websearch×5] → eval_search，可循环）|
-| **WriteSubgraph** | 嵌套在 OuterGraph `write` 节点下的子图（outline → draft → critic_review → polish，可循环）|
+| **WriteSubgraph** | 嵌套在 OuterGraph `write` 节点下的子图（outline → draft → critic_review ⇄ polish，可循环；终止条件 `critic_score >= 0.8 OR write_iters >= 2`）|
+| **emit_final_report_node** | 外层图第 5 节点（**不**在 WriteSubgraph 内，per [Q6]）；把 polished draft + sources 重整为合法 Markdown：行内 `{{cite_N}}` → `[ref_N]` + 末尾 `## References` 章节 |
 
 ---
 
@@ -73,11 +74,11 @@
 | **generateQueries** | PlanStep | list[ResearchQuery]（默认 5 条）|
 | **webSearch** | ResearchQuery | list[Source]（含 DashScope 返回的 index）|
 | **evaluateSearch** | list[Source] + UserQuery | list[SearchEvaluation] + 筛选后的 Source |
-| **generateOutline** | Plan + list[Source] | Outline |
-| **generateDraft** | Outline + list[Source] | Draft |
-| **reviewCritic** | Draft | Critique（带 quality score）|
-| **polishDraft** | Draft + Critique | PolishedDraft |
-| **emitReport** | (final Draft + list[Source]) | FinalReport（带 `[ref_N]` 引用）|
+| **generateOutline** | Plan + list[Source] | Outline ✅ (spec 004 实装，h2 章节数 == len(plan)） |
+| **generateDraft** | Outline + list[Source] | Draft ✅ (spec 004 实装，draft 含 `{{cite_N}}` 占位符；retry 1× on placeholder_count=0）|
+| **reviewCritic** | Draft | Critique（带 quality score）✅ (spec 004 实装，JSON schema 含 `score` / `comments` / `suggestions` / `iteration`）|
+| **polishDraft** | Draft + Critique | PolishedDraft ✅ (spec 004 实装；"尽力改进"哲学——空 draft / >50% 缩减**不抛错**）|
+| **emitReport** | (final Draft + list[Source]) | FinalReport（带 `[ref_N]` 引用）✅ (spec 004 实装，行内 `{{cite_N}}` → `[ref_N]` + `## References` + Source.index 重复静默跳过）|
 
 ---
 

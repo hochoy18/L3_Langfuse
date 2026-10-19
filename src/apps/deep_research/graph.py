@@ -6,13 +6,16 @@ Public API:
   (or ``{"error": "no_pending_interrupt", "thread_id": ...}`` per Q3,
    or ``{"error": "thread_id_busy", "thread_id": ...}`` per FR-017)
 
-Graph topology (per ADR-0001):
+Graph topology (per ADR-0001 + spec 004 [Q6]):
 
-    START → plan → confirm_plan → research → write → END
+    START → plan → confirm_plan → research → write → emit_final_report → END
                           ↓ (interrupt when auto_confirm_plan=False)
                           plan (when user rejects)
 
-``research`` and ``write`` are compiled sub-graphs attached as nodes.
+``research``, ``write`` are compiled sub-graphs attached as nodes.
+``emit_final_report`` is a top-level node (spec 004 [Q6]: outer-graph, NOT
+inside the write sub-graph, so it can also serve as the entry point for
+future spec 005 export/send steps).
 
 spec 002 additions (per FR-017):
 - ``_acquire_thread_lock(tid)`` — Postgres advisory lock scoped to thread_id,
@@ -24,6 +27,7 @@ spec 002 additions (per FR-017):
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from contextlib import contextmanager
 from typing import Any
@@ -126,6 +130,94 @@ def _acquire_thread_lock(tid: str):
 _NO_CHECKPOINTER = object()
 
 
+# ---------------------------------------------------------------------------
+# spec 004 FR-007 + FR-008: emit_final_report — outer-graph node (per [Q6]).
+# Not in the write sub-graph: emit depends on the FULL state (all sources
+# aggregated across research, plus the polished draft) and is the boundary
+# between the write loop and any future spec-005 export/send step.
+# ---------------------------------------------------------------------------
+def _emit_final_report_node(state: DeepResearchState) -> dict:
+    """Produce FinalReport markdown (per FR-007 + FR-008 + [Q3] + [Q7]).
+
+    Algorithm (per CitationPolicy + ReferenceListPolicy in CONTEXT.md §6):
+    1. Take ``state["draft"]`` as the polished Markdown body.
+    2. ``re.sub(r'\\{\\{cite_(\\d+)\\}\\}', lambda m: f'[ref_{m.group(1)}]', draft)``
+       — replaces every ``{{cite_N}}`` placeholder with ``[ref_N]`` inline
+       citation. Already-resolved ``[ref_N]`` literals pass through unchanged.
+    3. ``[Q3] / [R2]``: placeholder N that has no matching ``Source.index``
+       is dropped (regex returns `None`), NOT replaced — the literal token
+       does not appear in the final report.
+    4. ``Source.index`` duplicate defense (per [Q7] / [R6]): rebuild an
+       ``index → position`` map via ``enumerate`` over ``state["sources"]``;
+       drop duplicates silently (do NOT raise).
+    5. Assemble ``## References`` section sorted by Source.index ascending.
+       Each line is ``{i}. [{title}]({url}) — score: {score:.2f}`` (per FR-007(c)
+       + plan §实现路径概要 + data-model.md L166: numbered markdown link).
+    6. Return ``{"final_report": markdown_str}``.
+    """
+    draft_text = state.get("draft", "") or ""
+    sources = list(state.get("sources") or [])
+
+    # (4) Source.index duplicate defense (per [Q7] / [R6]) — rebuild a unique
+    # ``[1..N]`` mapping via enumerate; drop collisions silently.
+    sources_indexed: list[tuple[int, Any]] = []
+    seen: set[int] = set()
+    for pos, src in enumerate(sources, start=1):
+        try:
+            original_idx = int(getattr(src, "index", pos))
+        except (TypeError, ValueError):
+            original_idx = pos
+        if original_idx in seen:
+            print(
+                f"[emit] duplicate Source.index={original_idx} skipped at "
+                f"pos={pos}"
+            )
+            continue
+        seen.add(original_idx)
+        sources_indexed.append((original_idx, src))
+
+    # (3) [Q3] valid set for placeholder replacement — only N in this set
+    # are substituted by ``[ref_N]``; any other placeholder digit is dropped.
+    # Accept BOTH `{{cite_N}}` (spec-contract form per FR-002) and `{{ref_N}}`
+    # (LLM common idiom that the draft prompt sometimes triggers; defensive).
+    valid_indices = {idx for idx, _ in sources_indexed}
+
+    def _resolve_placeholder(match: re.Match) -> str:
+        n = int(match.group(1))
+        if n not in valid_indices:
+            # per [Q3] — drop, do not raise
+            return ""
+        return f"[ref_{n}]"
+
+    # Use a non-anchored regex that allows optional whitespace between the
+    # opening braces and the ``cite_``/``ref_`` keyword (LLM occasionally
+    # produces `{{ cite_N }}`). Capture only the integer.
+    placeholder_re = re.compile(r"\{\{\s*(?:cite|ref)_(\d+)\s*\}\}")
+    resolved = placeholder_re.sub(_resolve_placeholder, draft_text)
+
+    # (5) ## References section — sorted by Source.index ascending; format
+    # per ReferenceListPolicy (FR-007(c) + plan §实现路径概要 + data-model.md L166):
+    # ``{i}. [{title}]({url}) — score: {score:.2f}`` — numbered list with
+    # markdown link + ``score:`` prefix (no parens). `i` is the position in
+        # the sorted-by-`Source.index`-ascending list (== Source.index when
+        # Source.index is 1..N global unique).
+    sources_sorted = sorted(sources_indexed, key=lambda x: x[0])
+    ref_lines = ["", "", "## References", ""]
+    for i, (idx, src) in enumerate(sources_sorted, start=1):
+        title = getattr(src, "title", "(no title)")
+        url = str(getattr(src, "url", ""))
+        score = getattr(src, "score", None)
+        score_suffix = f"score: {score:.2f}" if score is not None else "score: n/a"
+        ref_lines.append(f"{i}. [{title}]({url}) — {score_suffix}")
+
+    final_report = resolved.rstrip() + "\n" + "\n".join(ref_lines) + "\n"
+    print(
+        f"[emit] final_report chars={len(final_report)} "
+        f"references={len(sources_sorted)}"
+    )
+    return {"final_report": final_report}
+
+
 def build_graph(
     db_uri: str | None = None,
     *,
@@ -175,6 +267,10 @@ def build_graph(
     g.add_node("confirm_plan", confirm_plan_node)
     g.add_node("research", build_research_subgraph())
     g.add_node("write", build_write_subgraph())
+    # spec 004 FR-009 + [Q6]: emit_final_report is a top-level outer-graph
+    # node (not in the write sub-graph).  Wired write → emit_final_report →
+    # END so any spec-005 export/send step can hook between emit and END.
+    g.add_node("emit_final_report", _emit_final_report_node)
 
     g.add_edge(START, "plan")
     g.add_edge("plan", "confirm_plan")
@@ -188,7 +284,8 @@ def build_graph(
         {"plan": "plan", "research": "research"},
     )
     g.add_edge("research", "write")
-    g.add_edge("write", END)
+    g.add_edge("write", "emit_final_report")
+    g.add_edge("emit_final_report", END)
 
     compiled = g.compile(checkpointer=checkpointer)
     if saver_ctx is not None:

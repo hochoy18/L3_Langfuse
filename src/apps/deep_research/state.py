@@ -132,7 +132,13 @@ class DeepResearchState(TypedDict):
     # Write stage outputs (raw text)
     outline: str
     draft: str
-    critique_history: list[Critique]
+    # spec 004: write loop can run 1-2 critic iterations; need append-reducer
+    # so each critique is preserved (without reducer, second critic overwrites
+    # first). ``operator.add`` is safe here because ``_critic_review_node`` is
+    # the ONLY writer to this field, both inside and outside the write
+    # sub-graph — no Send fan-in, no multi-writer. See [[langgraph-subgraph-reducer-doubling]]
+    # if a future spec adds a second writer.
+    critique_history: Annotated[list[Critique], operator.add]
     final_report: str
     # Counters (initialized by run_research; stub nodes do not touch)
     iteration_counts: dict[str, int]

@@ -84,12 +84,24 @@ class Draft(_Base):
 
 
 class Critique(_Base):
-    """LLM-as-Judge review of a Draft."""
+    """LLM-as-Judge review of a Draft (per spec 004 FR-014 + [Q4]).
+
+    spec 004 MINOR upgrade: adds ``suggestions: list[str]`` (default empty list,
+    max 10 entries). Backward-compatible with foundation stub Critique instances
+    that only carry ``score + comments`` — old instances deserialize with
+    ``suggestions=[]``. ``polish_node`` (spec 004) falls back to deriving
+    suggestions from ``comments`` when this field is empty (see [R3]).
+    """
 
     score: float = Field(..., description="Overall quality 0.0-1.0 (WriteTerminationPolicy threshold: 0.8)")
     comments: str = Field(..., description="Free-form feedback from the LLM critic")
     dimensions: dict[str, float] = Field(
         default_factory=dict, description="Optional per-dimension scores (e.g. {'clarity': 0.9})"
+    )
+    suggestions: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description="Actionable improvement suggestions for the polish node (per [Q4]); ≤10 entries",
     )
     iteration: int = Field(..., description="Which write iteration (1, 2...) this critique belongs to")
 

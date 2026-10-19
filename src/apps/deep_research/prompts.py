@@ -90,7 +90,7 @@ def get_prompt(name: str, label: str | None = None):
 
 
 def get_llm(
-    role: Literal["plan", "research", "write", "critic", "polish"],
+    role: Literal["plan", "research", "write", "draft", "critic", "polish"],
 ) -> ChatOpenAI:
     """Return a ``ChatOpenAI`` instance for the named role (per FR-005 + contract §C2).
 
@@ -98,31 +98,36 @@ def get_llm(
     temperature=0.4).
     spec 003 implements ``role="research"`` (same model, temperature=0.2 — lower
     for query diversity / focus; per [Q3] clarification).
-    Other roles raise ``NotYetImplementedError`` for spec 004 to fill in.
+    spec 004 implements ``role="write"`` / ``role="draft"`` / ``role="critic"`` /
+    ``role="polish"`` (per [Q2] — 4 new write-loop LLM roles; temperatures
+    0.4 / 0.7 / 0.2 / 0.5 per [R1]).
 
     Parameters
     ----------
-    role : Literal["plan", "research", "write", "critic", "polish"]
-        Logical LLM role. ``"plan"`` + ``"research"`` are wired.
+    role : Literal["plan", "research", "write", "draft", "critic", "polish"]
+        Logical LLM role. All 6 are wired as of spec 004.
 
     Returns
     -------
     langchain_openai.ChatOpenAI
-        For ``role="plan"``: ``temperature=0.4``.
-        For ``role="research"``: ``temperature=0.2``.
+        ``temperature`` per role:
+        ``"plan"`` → 0.4 / ``"research"`` → 0.2 / ``"write"`` → 0.4 /
+        ``"draft"`` → 0.7 (spec 004 new, per [Q2]) / ``"critic"`` → 0.2 /
+        ``"polish"`` → 0.5.
 
     Raises
     ------
     NotYetImplementedError
-        ``role in {"write", "critic", "polish"}`` (spec 004).
+        ``role`` not in the 6 wired values (future spec slots).
     RuntimeError
         ``DASHSCOPE_API_KEY`` not set in environment.
     """
-    if role in ("plan", "research"):
+    if role in ("plan", "research", "write", "draft", "critic", "polish"):
         api_key = os.environ.get("DASHSCOPE_API_KEY")
         if not api_key:
             raise RuntimeError(
-                "DASHSCOPE_API_KEY not set; set it in .env to call the LLM"
+                "DASHSCOPE_API_KEY not set; required for write subgraph "
+                "(outline / draft / critic / polish) and other LLM calls"
             )
         # Per spec 002 research §R3: default to the public OpenAI-compatible
         # DashScope endpoint. ``DASHSCOPE_API_BASE_URL`` overrides for regional
@@ -137,10 +142,15 @@ def get_llm(
         # lets the deployer pin the actual model; default keeps the spec value
         # so public DashScope works out-of-the-box.
         model = os.environ.get("DASHSCOPE_MODEL", "qwen3.7-plus")
-        # spec 003 [Q3]: research LLM uses lower temperature (0.2 vs plan's 0.4)
-        # to keep query generation focused and avoid LLM "creativity" on search
-        # query strings.
-        temperature = 0.2 if role == "research" else 0.4
+        # spec 004 [Q2] + [R1]: per-role temperature
+        temperature = {
+            "plan": 0.4,
+            "research": 0.2,
+            "write": 0.4,
+            "draft": 0.7,
+            "critic": 0.2,
+            "polish": 0.5,
+        }[role]
         return ChatOpenAI(
             model=model,
             api_key=api_key,
@@ -148,7 +158,8 @@ def get_llm(
             temperature=temperature,
         )
 
-    # write / critic / polish deferred to spec 004
+    # Future spec roles (e.g., "summarize", "translate") should be added to
+    # the Literal above + the temperature dict, not deferred to NotYetImplementedError.
     raise NotYetImplementedError(f"get_llm not yet implemented: {role}")
 
 
