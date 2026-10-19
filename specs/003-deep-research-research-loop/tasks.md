@@ -328,3 +328,47 @@ T025 / T026 / T027（3 个 SC 验证） + T028 (README) + T029 (源码头注释)
   6. **HttpUrl 序列化用 `model_dump(mode="json")` 避免 msgpack 错误** —— per [[langgraph-pydantic-serde]] 经验。
   7. **Bailian App `output.search_results` 字段名实测** —— 跑 `print(json.dumps(resp.output, indent=2))` 看真实 schema，adjust T008 解析。
   8. **Send fan-out 节点 `_websearch_node` 拿不到完整 state.sources** —— 必须返回全量 list 而非 delta（per [[langgraph-subgraph-reducer-doubling]] + data-model §5.1 + R4 plain list 拼接）。
+
+---
+
+## Phase 9: Convergence（`/speckit-converge` 产出）
+
+**Purpose**: `/speckit-converge` 在 spec 003 完整交付后跑出的剩余 gap。所有 T001-T030 已 `[x]`，但 spec ↔ code ↔ contracts 文件之间存在 4 处可收敛的 doc/code drift。F1 + F2 是 MEDIUM（contracts 文档 stale 但代码正确），F3 + F4 是 LOW（NFR-001 未自动化 gate + plan.md 未声明 research_queries reducer）。F5/F6/F7 已在 tasks.md 注释中说明，不进 phase 9。
+
+**Source**: `/speckit-converge 003-deep-research-research-loop` 评估（2026-10-19）— 见本 phase 上方 "Convergence Findings" 表（6 项：0 missing / 4 partial / 2 contradicts / 1 unrequested；0 CRITICAL / 0 HIGH / 2 MEDIUM / 4 LOW）。
+
+### Implementation for Convergence
+
+- [x] T031 同步 `specs/003-deep-research-research-loop/contracts/README.md` §C2 to actual `tools.py` 行为 (per F1) — 代码已正确，contract 文档 stale。**4 处修正**：
+  - L90 表格行："`USE_WEB_SEARCH_APP=false` 抛 `RuntimeError(...)`" → "read-and-warn；不抛错；保留 env name 给 dev/CI 未来用"（per FR-004 + C2 + T008(b) + tools.py:152-159 当前实装）
+  - L91 表格行："App 返回 HTTP 200 + 非空 `output.search_results`" → "App 返回 HTTP 200 + 2 层 JSON 解析 `resp.output['text']` → `outer['result']['content'][0]['text']` → `inner['pages']`"（per T008(c)(d) + tools.py:195-203 + memory [[dashscope-bailian-app-output-schema]]）
+  - L92 表格行："App 返回 HTTP 200 + 空 `output.search_results`" → "App 返回 HTTP 200 + `result.isError=true` OR `pages` 字段空"（per T010 + tools.py:197-202）
+  - L106 retry 伪代码：`e.code not in (429, 500, 502, 503)` → `getattr(e, "http_code", None) in _RETRYABLE_HTTP_CODES`（per T009 + tools.py:265 + memory [[dashscope-rerank-sdk-quirks]] exception class 路径）
+  - L117 Side Effects：`Application.call(applet_id=APP_ID, ...)` → `Application.call(app_id=APP_ID, ...)`（per T008 + tools.py:177 + module docstring L22-23）
+
+- [x] T032 同步 `specs/003-deep-research-research-loop/contracts/README.md` §C3 to actual `tools.py::DashScopeReRank._run` 行为 (per F2) — 代码已正确，contract 文档 stale。**3 处修正**：
+  - L135 Signature：`def _run(self, query: str, documents: list[str], **kwargs) -> list[Source]` → `def _run(self, query: str, sources: list[Source], **kwargs) -> list[Source]`（per T016 deviation + tools.py:338）
+  - L144-145 表格行：`documents=[s.content or s.title for s in sources]` → 当前代码内部已做；强调"caller 传 list[Source]，内部转 list[str]"（per T016 + tools.py:390）
+  - L145-146 结果映射行：`r.relevance_score` 写回 `Source.score`（位置映射）→ `r.index` back-mapping 后 `sources[r.index].score = float(r.relevance_score)`（per T016 关键发现 1 + tools.py:435-440 + memory [[dashscope-rerank-sdk-quirks]]）
+  - L147 Exception class：`dashscope.exceptions.DashScopeException` → `dashscope.common.error.DashScopeException`（per T016 关键发现 + tools.py:399 + memory [[dashscope-rerank-sdk-quirks]]）
+
+- [x] T033 在 `src/apps/deep_research/bench_latency.py` 加 NFR-001 latency gate (per F3) — 可选 LOW 改进。**单文件脚本**：跑 N=5 次 `run_research({'user_query': '<标准 query>', 'auto_confirm_plan': True}, thread_id=f'bench-{i}')` mock ReRank 走 happy path（绕开 MaaS 401），记录 wall-clock；assert P50 ≤ 30s, P90 ≤ 60s。**已知限制**：当前 spec 003 实装 T021 SC-006 跑出 68s 仍超 P50 budget；NFR-001 是 spec 阶段 soft target（非 CI gate）。如果实测 P50 > 30s 在本机是真的，要么 (a) 接受并降 NFR-001 预算到 60s + P90 120s（spec amendment）或 (b) 优化（parallelize ReRank across groups / 减 Bailian App round-trip）。**最小动作**：写脚本 + 跑一次出实测值 + 把"实测 P50/P90 写进 README"段（避免 silent budget violation）
+
+- [x] T034 在 `specs/003-deep-research-research-loop/plan.md` §Phase 1 Design + `contracts/README.md` §C11 显式声明 `research_queries: Annotated[list[ResearchQuery], _merge_queries_by_identity]` reducer (per F4) — 代码已正确（`state.py:82-99` + `state.py:127`），但 plan.md / contracts §C11 都只声明了 `raw_sources` 的 reducer。**unrequested addition 的文档化**：
+  - plan.md §Phase 1 Data Model 段加一行："`research_queries` 也走 `_merge_queries_by_identity` reducer（与 `raw_sources` 同 Send-fan-in rationale；`_websearch_node` 每 worker 写 1 条 `ResearchQuery`）"
+  - contracts §C11 表中 `research_queries` 行从 "(无)" 改为 "spec 003 新写者 + Annotated reducer for Send fan-in"
+
+### Convergence 完成态
+
+Phase 9 完成后 spec 003 进入"converged"状态：代码 + plan + contracts + README + tasks.md 五者对齐，无 missing/contradicts gap。F5/F6/F7 (LOW partial) 已在 Phase 8 T030 注脚 + T015/T025 说明，不进 phase 9。
+
+### 关键路径
+
+Phase 9 4 个 task 互不依赖（不同文件 / 不同主题），可全部 `[P]` 并行；工作量合计 < 1 小时。
+
+### Notes
+
+- Phase 9 是 `/speckit-converge` 标准输出；T031-T034 不是新的 implementation 工作，而是 spec 003 "代码 → 文档反向同步" 的最后一公里。
+- 如果用户认为 T031-T032 文档同步不必做（合同只用来做 spec 设计阶段参考、代码 docstring 已经记录 drift），可以删除这两 task；建议保留是因为 contracts/README.md 是 quickstart.md 10 个 SC 脚本的引文来源。
+- T033 (NFR-001 bench) 完全可以推迟到 spec 005 引入 pytest 时一起做（spec 005 同时引入 latency benchmark 框架）。
+- T034 文档化 `research_queries` reducer 是 unrequested addition 的最小补救；不改 spec.md 也不改 plan.md §Summary 段（只动 §Phase 1）。

@@ -85,11 +85,11 @@ class DashScopeWebSearch(BaseTool):
 
 | 条件 | 行为 |
 |---|---|
-| `DASHSCOPE_WEB_SEARCH_APP_ID` 缺失 | 抛 `RuntimeError("DASHSCOPE_WEB_SEARCH_APP_ID not set")` |
-| `DASHSCOPE_WEB_SEARCH_APP_TOKEN` 缺失 | 抛 `RuntimeError("DASHSCOPE_WEB_SEARCH_APP_TOKEN not set")` |
-| `USE_WEB_SEARCH_APP=false` | 抛 `RuntimeError("USE_WEB_SEARCH_APP=false is dev-only bypass; not implemented in spec 003")`（per FR-004；spec 003 仅留 env 名字，不实现 bypass 路径） |
-| App 返回 HTTP 200 + 非空 `output.search_results` | 解析为 `list[Source]`，每个 `index=0`（per R4） |
-| App 返回 HTTP 200 + 空 `output.search_results` | 抛 `NotYetImplementedError("dashscope web search returned 0 results for query=<q>")` |
+| `DASHSCOPE_WEB_SEARCH_APP_ID` 缺失 | 抛 `RuntimeError("DASHSCOPE_WEB_SEARCH_APP_ID not set; ... Do NOT fall back to dashscope.Generation.call(enable_search=True) — that path is silently broken on the regional Aliyun MaaS gateway.")`（per FR-004 + Q1 footgun defense） |
+| `DASHSCOPE_WEB_SEARCH_APP_TOKEN` 缺失 | 抛 `RuntimeError("DASHSCOPE_WEB_SEARCH_APP_TOKEN not set; set it in .env to call Bailian web search App.")`（per FR-004） |
+| `USE_WEB_SEARCH_APP=false` | **read-and-warn**：env 被读但**不**实际切换路径（仍调 Bailian App）；spec 003 仅保留 env name 给 dev/CI 未来用，不实现 bypass 路径（per FR-004 + 实际实装 tools.py `_require_env`） |
+| App 返回 HTTP 200 + 2 层 JSON 解析 `resp.output['text']` → `outer['result']['content'][0]['text']` → `inner['pages']` 非空 | 解析为 `list[Source]`，每个 `index=0` 占位（per R4，renumbering 由 `_eval_search_node` 做） |
+| App 返回 HTTP 200 + `result.isError=true` OR `pages` 字段空 | 抛 `NotYetImplementedError("dashscope web search returned 0 results for query=<q>")`（per T010 + FR-005） |
 | App 返回 HTTP 429 | 指数退避 2 次（base=1s, exp=2x）；仍失败抛 `NotYetImplementedError("dashscope web search rate limited after 2 retries: query=<q>")` |
 | App 返回 HTTP 5xx | 同 429 路径 |
 | App 返回 HTTP 400/401/403 | 不重试，立即抛 `NotYetImplementedError` |
@@ -103,8 +103,11 @@ def _run(self, query: str, **kwargs) -> list[Source]:
     for attempt in range(3):  # 0, 1, 2 (initial + 2 retries)
         try:
             return self._do_query(query)
-        except dashscope.exceptions.RequestFailure as e:
-            if e.code not in (429, 500, 502, 503) or attempt == 2:
+        except dashscope.common.error.RequestFailure as e:
+            # dashscope 1.27.7: RequestFailure exposes `http_code` (NOT `code`).
+            # `code` is for App/Bailian-style 20000 envelopes; HTTP path uses http_code.
+            http_code = getattr(e, "http_code", None) or getattr(e, "code", None)
+            if http_code not in (429, 500, 502, 503) or attempt == 2:
                 raise NotYetImplementedError(f"dashscope web search failed: {e}") from e
             time.sleep(1.0 * (2 ** attempt))  # 0s, 1s, 2s
             last_err = e
@@ -114,7 +117,7 @@ def _run(self, query: str, **kwargs) -> list[Source]:
 
 ### Side Effects
 
-- 调用 `dashscope.Application.call(applet_id=APP_ID, prompt=query, api_key=APP_TOKEN)`
+- 调用 `dashscope.Application.call(app_id=APP_ID, prompt=query, api_key=APP_TOKEN)`（`app_id` 关键字；dashscope 1.27.7 中**没有** `applet_id`）
 - `print` retry 日志（spec 006 接 Langfuse span 前占位）
 - 不写 Postgres；不写 state
 
@@ -132,19 +135,26 @@ class DashScopeReRank(BaseTool):
     description: str = "ReRank documents by relevance via gte-rerank-v2."
     top_k: int = Field(default=5, description="Number of top documents to return.")
 
-    def _run(self, query: str, documents: list[str], **kwargs) -> list[Source]:
-        """Call TextReRank → write relevance_score to each Source.score → return."""
+    def _run(self, query: str, sources: list[Source], **kwargs) -> list[Source]:
+        """Call TextReRank → write relevance_score to each Source.score → return.
+
+        Takes `sources: list[Source]` directly (NOT `documents: list[str]`);
+        internally converts via `[s.content for s in sources]` before the
+        TextReRank.call, then writes scores back via `r.index` back-mapping
+        (per [[dashscope-rerank-sdk-quirks]]: SDK does NOT guarantee result
+        order, so positional mapping is unsafe).
+        """
 ```
 
 ### Contract
 
 | 条件 | 行为 |
 |---|---|
-| `len(documents) == 0` | 返回原 `sources`（不抛错，per FR-008 边界保护） |
-| `len(documents) >= 1` | 调 `dashscope.TextReRank.call(model="gte-rerank-v2", query=query, documents=documents, top_n=len(documents), return_documents=True)` |
-| ReRank 返回 status_code==20000 | 把 `r.relevance_score` 写回 `Source.score`；返回原 `sources` list |
-| ReRank 返回 status_code != 20000 | 抛 `NotYetImplementedError("dashscope rerank failed: <code>")`（per FR-007） |
-| `DASHSCOPE_API_KEY` 缺失 | `dashscope` SDK 抛 SDKError；包成 `NotYetImplementedError("dashscope rerank failed: <error>")` |
+| `len(sources) == 0` | 返回原 `sources`（不抛错，per FR-008 边界保护） |
+| `len(sources) >= 1` | 内部 `documents = [s.content for s in sources]`；调 `dashscope.TextReRank.call(model="gte-rerank-v2", query=query, documents=documents, top_n=len(documents), return_documents=True)` |
+| ReRank 返回 status_code==20000 | 遍历 `resp.output.results`，按 `r.index`（input-doc position，per [[dashscope-rerank-sdk-quirks]]）回填 `sources[r.index].score = float(r.relevance_score)`；返回原 `sources` list（in-place 修改） |
+| ReRank 返回 status_code != 20000 | 抛 `NotYetImplementedError("dashscope rerank failed: <code>: <message>")`（per FR-007） |
+| `DASHSCOPE_API_KEY` 缺失 或 抛 `dashscope.common.error.DashScopeException` | 包成 `NotYetImplementedError("dashscope rerank failed: <error>")`（per FR-007；注意 1.27.7 异常类在 `dashscope.common.error`，**不是** `dashscope.exceptions`） |
 
 ### Side Effects
 
@@ -416,3 +426,15 @@ spec 003 仅改变以下字段的**写入者**：
 | `outline` / `draft` / `critique_history` / `final_report` | stub | 不写 | spec 004 接手 |
 
 下游消费（spec 004）无需知道 sources 是 stub 还是真实产出——Pydantic schema 不变。
+
+### Send fan-in reducer 声明（per F4 convergence finding）
+
+LangGraph 1.2.x 的 Send fan-in 不会一次合并 worker delta，而是按 worker 完成顺序逐个调用 reducer N 次（per [[langgraph-1.2-send-fanin-reducer-multicall]]）。spec 003 为以下字段显式声明 reducer，**不能**依赖默认的 `LastValue` 或 `operator.add`：
+
+| 字段 | reducer | identity 字段 | 位置 |
+|---|---|---|---|
+| `research_queries` | `_merge_queries_by_identity` | `(text, target_step, iteration)` | `state.py::82-99` |
+| `raw_sources` | `_merge_sources_by_identity` | `(query_index, url)`（**不**含 `index`，因 `index` 会被 renumber 改写） | `state.py::46-79` |
+
+- `raw_sources` 是 spec 003 US3 新增的 12th 字段（per US3 data-model split：Send fan-in 写到 `raw_sources`，`_eval_search_node` 读 `raw_sources` → 写最终 `sources` 覆盖）。它在 spec 001/002 字段表之外，但在 US3 acceptance 内。
+- `research_queries` 的 reducer 是 spec 003 实装时新写的（未在 plan Phase 1 data-model 章节显式声明，per F4 finding）；此处补齐以保持 plan + state.py + 实际行为三处一致。

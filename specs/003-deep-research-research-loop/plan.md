@@ -164,6 +164,10 @@ src/apps/deep_research/
   - `search_evaluations`：`eval_search_node` 一次性写入（`evaluator="rerank"` 或 `"llm_judge"`）
   - `research_queries`：`websearch_node` 每条 query 一次（Send fan-in 拼接）
   - `iteration_counts`：`gen_query_node` 入口 +1（per FR-014 + R6）
+  - **Send fan-in reducer 声明**（per R3 + [[langgraph-1.2-send-fanin-reducer-multicall]]）：
+    - `research_queries: Annotated[list[ResearchQuery], _merge_queries_by_identity]` — identity = `(text, target_step, iteration)`；first-seen wins（additive 跨 worker delta 拼接）
+    - 实装位置：`src/apps/deep_research/state.py::_merge_queries_by_identity`
+    - 同样的 reducer 模式用于 spec 003 US2 新增的 `raw_sources` 通道（identity = `(query_index, url)`），但 `raw_sources` 不在 spec 001 字段里（per US3 data-model split）
 - **Send payload schema**：`{"query": str, "target_step": int, "iteration": int, "query_index": int}`
 - **错误 schema**：5 类 `NotYetImplementedError` 子消息（websearch 429 / websearch 空 / rerank failed / judge failed / 3 iterations yielded 0）
 - **与 spec 002 接口边界**：spec 002 写 `plan` / `messages` / `auto_confirm_plan`；spec 003 写 `sources` / `search_evaluations` / `research_queries` / `iteration_counts["research"]` —— **互不重叠**
