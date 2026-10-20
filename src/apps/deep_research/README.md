@@ -89,9 +89,7 @@ src/apps/deep_research/
 
 ## 🚧 当前状态（implementation status）
 
-本 README 写于**设计阶段完成、代码尚未实现**的节点。
-
-实现完成后，会在每个文件头加 ✅ 标记，并在 README 末尾加"实现进度表"。
+spec 002/003/004/005 均已实现 ✅。详细增量见下方各 spec section。
 
 ### spec 002 增量（Plan + Confirm 阶段）
 
@@ -213,6 +211,50 @@ exit_when     = NOT loop_condition
 - 放 outer graph 让 spec 005（export/send）能在 emit → END 之间挂新节点，无需重排 write subgraph
 
 详细 spec 见 [`specs/004-deep-research-write-loop/spec.md`](../../specs/004-deep-research-write-loop/spec.md)。
+
+---
+
+### spec 005 增量（Streamlit UI + CLI 烟雾测试）
+
+spec 005 新增两个 **入口**（per ADR-0006）：
+
+1. **`src/apps/deep_research/app.py`** — Streamlit 单页 UI
+   - 浏览器入口：`streamlit run src/apps/deep_research/app.py` → http://localhost:8501
+   - **session_state** 模式（per ADR-0006）：
+     - `thread_id`：首次访问自动生成 uuid4；侧边栏 Load thread 接管历史 state；Reset thread 重新生成
+     - `last_action` + `user_input`：rerun 调度键（start / approve / edit）
+   - **plan 审阅**：检测 `result["__interrupt__"]` → 渲染 plan Markdown + Approve / Submit Edit 按钮
+   - **最终报告**：`st.success` + `st.markdown(result["final_report"])` + `st.download_button`（per FR-008）
+   - **进度展示**：单一 `st.spinner("研究进行中...")` + 单次 `st.markdown("✅ 完成")`（per FR-010 + R3；阶段切换留给 spec 006 Langfuse hooks）
+
+2. **`src/apps/deep_research/cli.py`** — CLI 烟雾测试
+   - 调用：`python -m src.apps.deep_research.cli "你的研究问题" [--thread-id=<tid>]`
+   - **hardcoded** `auto_confirm_plan=True`（per ADR-0006 — CLI 无人工审阅界面）
+   - **exit code 约定**（per Q5）：
+     - `0` = 成功（`print(final_report)` 到 stdout）
+     - `1` = 其他错误（缺参 / invoke 异常 / 其他 error）
+     - `2` = `thread_id_busy`（可重试，符合 POSIX `< 64` 重试语义）
+   - **stderr 日志**：`[cli] thread_id=<tid>` + `[cli] query=<q[:80]>` + `[cli] WARNING: thread_id=<tid> already has N checkpoint(s)`（per FR-014）
+
+**测试**：`tests/apps/deep_research/test_app_cli.py`（29 个测试，覆盖率 gate ≥80% per FR-022）：
+- `TestRunResearchWithStages` (4)：`_run_research_with_stages` 分支（interrupt / final_report / no_pending_interrupt / thread_id_busy）
+- `TestFormatPlanMd` (2)：plan Markdown 渲染（with / without description）
+- `TestAppRender` (12)：`_render()` 全流程（sidebar Load/Reset / rerun dispatch / start / approve / edit / result rendering 4 个分支）
+- `TestCliMain` (5)：cli main happy / exception / argparse usage / thread_id_busy / reuse warning
+- `TestCliEdgeBranches` (4)：OperationalError / no_pending_interrupt / --help / __main__
+
+**Project-level 变更**：
+- `pyproject.toml` 新增 `streamlit>=1.30.0,<2.0`（per FR-015）+ dev group 加 `pytest>=8.0` / `pytest-cov>=5.0` / `pytest-asyncio>=0.23`（per FR-016 + Principle III — pytest 是项目首次引入）
+
+**未修改** graph / state / schemas / prompts / tools / nodes（per FR-017）— spec 005 纯入口层。
+
+**约束**（per ADR-0006 + Constitution Constraint #7）：
+- ✅ Streamlit 是 **单页 UI**（st.session_state 模式，无 multi-page routing）
+- ✅ CLI 是 **烟雾测试**（hardcoded `auto_confirm_plan=True`，不暴露 `auto_confirm_plan` flag）
+- ✅ **不引入新 env var**（per FR-018）：LANGGRAPH_CHECKPOINT_DB 复用 spec 001 已有的
+- ✅ 端到端验证：`pytest --cov-fail-under=80` 通过，coverage 86%
+
+详细 spec 见 [`specs/005-deep-research-streamlit-ui/spec.md`](../../specs/005-deep-research-streamlit-ui/spec.md) + [`tasks.md`](../../specs/005-deep-research-streamlit-ui/tasks.md)。
 
 ---
 

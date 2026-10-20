@@ -28,6 +28,7 @@ uv.lock
 *.log
 .mypy_cache/
 .ruff_cache/
+.coverage
 
 # Local Claude Code state (skills, memory, settings)
 .claude/
